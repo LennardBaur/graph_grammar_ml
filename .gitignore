@@ -15,6 +15,8 @@ retro_star/dataset/
 retro_star/one_step_model/
 retro_star/saved_models/
 retro_star/retro_data.zip
+dist/
+log-*/
 
 # Environments
 .env
