@@ -1,0 +1,825 @@
+(DEG) lennard-HP-EliteDesk-800-G6-Desktop-Mini-PC% python durchlauf_visualisiert.py
+
+######################################################################
+  DEG PAPER: DIDAKTISCHER DURCHLAUF
+######################################################################
+
+
+    Dieses Skript fuehrt den GESAMTEN DEG-Algorithmus Schritt fuer Schritt
+    durch, mit nur 2 Molekuelen und ausfuehrlichen Prints.
+
+    Phasen:
+      1. Datenverarbeitung (SMILES -> Hypergraph -> Subgraphen)
+      2. Eine einzelne MCMC-Iteration im Detail
+      3. Kompletter MCMC-Durchlauf (alle Iterationen)
+      4. Warum 5 MCMC Samples? (Vergleich)
+      5. REINFORCE Training (eine Epoche)
+      6. Molekuel-Generierung aus der Grammatik
+
+    Bilder werden in verstehen/bilder/ gespeichert.
+
+
+======================================================================
+  PHASE 1: DATENVERARBEITUNG
+======================================================================
+
+
+    Was passiert hier? (Paper Sec. 3, S.3)
+    ----------------------------------------
+    1. Wir nehmen 2 Isocyanat-Molekuele als Eingabe
+    2. Jedes Molekuel wird als Hypergraph dargestellt
+    3. Die Hyperedges (= Cluster) werden identifiziert:
+       - Einzelne Bindungen -> je eine Hyperedge
+       - Ringe -> je eine Hyperedge die alle Ring-Atome verbindet
+    4. Ein SubGraphSet trackt identische Subgraphen ueber alle Molekuele
+
+--- Schritt 1.1: Eingabe-Molekuele ---
+  [Molekuel 0]
+    SMILES:     O=C=NCCCCCCN=C=O
+    #Atome:     12
+    #Bindungen: 11
+    #Ringe:     0
+    -> Bild gespeichert: bilder/phase1_mol0.png
+  [Molekuel 1]
+    SMILES:     CC1=C(C=C(C=C1)CN=C=O)N=C=O
+    #Atome:     14
+    #Bindungen: 14
+    #Ringe:     1
+      Ring 0: Atome [1, 6, 5, 4, 3, 2] = ['C', 'C', 'C', 'C', 'C', 'C']
+    -> Bild gespeichert: bilder/phase1_mol1.png
+
+--- Schritt 1.2: data_processing() aufrufen ---
+    Konvertiert SMILES -> Kekulized Mol -> Cluster finden -> Hypergraph
+
+data processing 0/2
+data processing 1/2
+
+--- Schritt 1.3: Ergebnis der Datenverarbeitung ---
+
+  === Molekuel 0: O=C=NCCCCCCN=C=O ===
+  Hypergraph [Mol 0]:
+    #Knoten (=Bonds): 11  |  #Edges (=Atome/Hyperedges): 12
+    Edges (= Atome/Gruppen):
+      e0: O (T) -- Knoten: bond_0(bond_type=2)
+      e1: C (T) -- Knoten: bond_0(bond_type=2), bond_1(bond_type=2)
+      e10: C (T) -- Knoten: bond_10(bond_type=2), bond_9(bond_type=2)
+      e11: O (T) -- Knoten: bond_10(bond_type=2)
+      e2: N (T) -- Knoten: bond_1(bond_type=2), bond_2(bond_type=1)
+      e3: C (T) -- Knoten: bond_2(bond_type=1), bond_3(bond_type=1)
+      e4: C (T) -- Knoten: bond_3(bond_type=1), bond_4(bond_type=1)
+      e5: C (T) -- Knoten: bond_4(bond_type=1), bond_5(bond_type=1)
+      e6: C (T) -- Knoten: bond_5(bond_type=1), bond_6(bond_type=1)
+      e7: C (T) -- Knoten: bond_6(bond_type=1), bond_7(bond_type=1)
+      e8: C (T) -- Knoten: bond_7(bond_type=1), bond_8(bond_type=1)
+      e9: N (T) -- Knoten: bond_8(bond_type=1), bond_9(bond_type=2)
+
+  Subgraphen von [Mol 0]: 11 Stueck
+    Subgraph 0: Atom-Indices=[0, 1]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 1: Atom-Indices=[1, 2]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[2, 3]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 3: Atom-Indices=[3, 4]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 4: Atom-Indices=[4, 5]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 5: Atom-Indices=[5, 6]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 6: Atom-Indices=[6, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 7: Atom-Indices=[8, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 8: Atom-Indices=[8, 9]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 9: Atom-Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 10: Atom-Indices=[10, 11]  SMILES=O=[CH2:1]  #Atome=2
+
+  === Molekuel 1: Cc1c(N=C=O)cc(CN=C=O)cc1 ===
+  Hypergraph [Mol 1]:
+    #Knoten (=Bonds): 14  |  #Edges (=Atome/Hyperedges): 14
+    Edges (= Atome/Gruppen):
+      e0: C (T) -- Knoten: bond_0(bond_type=1)
+      e1: C (T) -- Knoten: bond_0(bond_type=1), bond_1(bond_type=2), bond_13(bond_type=1)
+      e10: C (T) -- Knoten: bond_10(bond_type=2), bond_9(bond_type=2)
+      e11: O (T) -- Knoten: bond_10(bond_type=2)
+      e12: C (T) -- Knoten: bond_11(bond_type=1), bond_12(bond_type=2)
+      e13: C (T) -- Knoten: bond_12(bond_type=2), bond_13(bond_type=1)
+      e2: C (T) -- Knoten: bond_1(bond_type=2), bond_2(bond_type=1), bond_5(bond_type=1)
+      e3: N (T) -- Knoten: bond_2(bond_type=1), bond_3(bond_type=2)
+      e4: C (T) -- Knoten: bond_3(bond_type=2), bond_4(bond_type=2)
+      e5: O (T) -- Knoten: bond_4(bond_type=2)
+      e6: C (T) -- Knoten: bond_5(bond_type=1), bond_6(bond_type=2)
+      e7: C (T) -- Knoten: bond_11(bond_type=1), bond_6(bond_type=2), bond_7(bond_type=1)
+      e8: C (T) -- Knoten: bond_7(bond_type=1), bond_8(bond_type=1)
+      e9: N (T) -- Knoten: bond_8(bond_type=1), bond_9(bond_type=2)
+
+  Subgraphen von [Mol 1]: 9 Stueck
+    Subgraph 0: Atom-Indices=[0, 1]  SMILES=C[CH3:1]  #Atome=2
+    Subgraph 1: Atom-Indices=[2, 3]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[3, 4]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 3: Atom-Indices=[4, 5]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 4: Atom-Indices=[8, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 5: Atom-Indices=[8, 9]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 6: Atom-Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 7: Atom-Indices=[10, 11]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 8: Atom-Indices=[1, 2, 6, 7, 12, 13]  SMILES=c1c[CH:1]=[CH:1]c=[CH:1]1  #Atome=6
+
+--- Schritt 1.4: SubGraphSet (molekueluebergreifend) ---
+
+    Das SubGraphSet zaehlt fuer JEDEN unique Subgraphen:
+    - In wie vielen Molekuelen kommt er vor?
+    - Wie oft insgesamt?
+    Diese Zahlen werden spaeter als Features fuer den Agent benutzt!
+    (Paper Sec. 4.2: die 2 Zusatz-Features neben den 300-dim GNN-Features)
+
+  SubGraphSet: 6 unique Subgraphen
+    'O=[CH2:1]': kommt 4x vor, in 2 Molekuel(en)
+    '[CH2:1]=[NH:1]': kommt 4x vor, in 2 Molekuel(en)
+    '[CH3:1][NH2:1]': kommt 4x vor, in 2 Molekuel(en)
+    '[CH3:1][CH3:1]': kommt 6x vor, in 2 Molekuel(en)
+    'C[CH3:1]': kommt 1x vor, in 1 Molekuel(en)
+    'c1c[CH:1]=[CH:1]c=[CH:1]1': kommt 1x vor, in 1 Molekuel(en)
+
+
+======================================================================
+  PHASE 2: EINE MCMC-ITERATION (Grammatik-Konstruktion)
+======================================================================
+
+
+    Was passiert in EINER Iteration? (Paper Sec. 4.1, S.5, Figure 3)
+    ------------------------------------------------------------------
+    Fuer JEDES Molekuel gleichzeitig:
+    1. Der Agent bekommt Features fuer jeden Subgraphen
+    2. Der Agent entscheidet: welche Subgraphen sollen kontrahiert werden?
+    3. Ueberlappende selektierte Subgraphen werden zusammengefuegt
+    4. Fuer jeden zusammengefuegten Subgraph wird eine Produktionsregel erzeugt
+    5. Der Hypergraph wird aktualisiert (kontrahierte Teile -> NT-Knoten)
+
+    Danach hat jedes Molekuel WENIGER Subgraphen, und die Grammatik hat MEHR Regeln.
+
+--- VOR der Iteration ---
+  Subgraphen von [Mol 0]: 11 Stueck
+    Subgraph 0: Atom-Indices=[0, 1]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 1: Atom-Indices=[1, 2]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[2, 3]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 3: Atom-Indices=[3, 4]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 4: Atom-Indices=[4, 5]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 5: Atom-Indices=[5, 6]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 6: Atom-Indices=[6, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 7: Atom-Indices=[8, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 8: Atom-Indices=[8, 9]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 9: Atom-Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 10: Atom-Indices=[10, 11]  SMILES=O=[CH2:1]  #Atome=2
+  Subgraphen von [Mol 1]: 9 Stueck
+    Subgraph 0: Atom-Indices=[0, 1]  SMILES=C[CH3:1]  #Atome=2
+    Subgraph 1: Atom-Indices=[2, 3]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[3, 4]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 3: Atom-Indices=[4, 5]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 4: Atom-Indices=[8, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 5: Atom-Indices=[8, 9]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 6: Atom-Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 7: Atom-Indices=[10, 11]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 8: Atom-Indices=[1, 2, 6, 7, 12, 13]  SMILES=c1c[CH:1]=[CH:1]c=[CH:1]1  #Atome=6
+
+  Grammatik [vor Iteration]: 0 Regeln
+
+--- Iteration 0 ausfuehren ---
+
+  Noch 6 unique Subgraphen im SubGraphSet -> weiter gehts!
+
+  === Verarbeite Molekuel 0 ===
+  Subgraphen von [Mol 0]: 11 Stueck
+    Subgraph 0: Atom-Indices=[0, 1]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 1: Atom-Indices=[1, 2]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[2, 3]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 3: Atom-Indices=[3, 4]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 4: Atom-Indices=[4, 5]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 5: Atom-Indices=[5, 6]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 6: Atom-Indices=[6, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 7: Atom-Indices=[8, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 8: Atom-Indices=[8, 9]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 9: Atom-Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 10: Atom-Indices=[10, 11]  SMILES=O=[CH2:1]  #Atome=2
+
+    Schritt 2a: Feature-Berechnung fuer 11 Subgraphen
+      Subgraph 'O=[CH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH2:1]=[NH:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH3:1][NH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+      Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+      Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+      Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+      Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+      Subgraph '[CH3:1][NH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH2:1]=[NH:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph 'O=[CH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+
+    Schritt 2b: Agent-Sampling (MLP entscheidet fuer jeden Subgraph: 0 oder 1)
+
+  Agent-Entscheidung (0=ignorieren, 1=selektieren):
+    Subgraph 0: action=1  >>> SELEKTIERT <<<  Indices=[0, 1]  SMILES=O=[CH2:1]
+    Subgraph 1: action=1  >>> SELEKTIERT <<<  Indices=[1, 2]  SMILES=[CH2:1]=[NH:1]
+    Subgraph 2: action=0      ignoriert  Indices=[2, 3]  SMILES=[CH3:1][NH2:1]
+    Subgraph 3: action=0      ignoriert  Indices=[3, 4]  SMILES=[CH3:1][CH3:1]
+    Subgraph 4: action=0      ignoriert  Indices=[4, 5]  SMILES=[CH3:1][CH3:1]
+    Subgraph 5: action=1  >>> SELEKTIERT <<<  Indices=[5, 6]  SMILES=[CH3:1][CH3:1]
+    Subgraph 6: action=1  >>> SELEKTIERT <<<  Indices=[6, 7]  SMILES=[CH3:1][CH3:1]
+    Subgraph 7: action=1  >>> SELEKTIERT <<<  Indices=[8, 7]  SMILES=[CH3:1][CH3:1]
+    Subgraph 8: action=0      ignoriert  Indices=[8, 9]  SMILES=[CH3:1][NH2:1]
+    Subgraph 9: action=1  >>> SELEKTIERT <<<  Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]
+    Subgraph 10: action=0      ignoriert  Indices=[10, 11]  SMILES=O=[CH2:1]
+
+    Schritt 2c: Zusammenfuegen ueberlappender selektierter Subgraphen
+      Merged Subgraph 0: SMILES=O=C=[NH:1]  Indices=[0, 1, 2]
+      Merged Subgraph 1: SMILES=C(C[CH3:1])[CH3:1]  Indices=[5, 6, 7, 8]
+      Merged Subgraph 2: SMILES=[CH2:1]=[NH:1]  Indices=[9, 10]
+
+    Schritt 2d: Produktionsregeln generieren
+      -> NEUE Regel 0 [END] erzeugt!
+      -> NEUE Regel 1 [END] erzeugt!
+      -> NEUE Regel 2 [END] erzeugt!
+
+    Nach Iteration -- verbleibende Subgraphen:
+  Subgraphen von [Mol 0]: 5 Stueck
+    Subgraph 0: Atom-Indices=[0, 1, 2, 3]  SMILES=O=C=N[CH3:1]  #Atome=4
+    Subgraph 1: Atom-Indices=[3, 4]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[4, 5, 6, 7, 8]  SMILES=C(C[CH3:1])C[CH3:1]  #Atome=5
+    Subgraph 3: Atom-Indices=[5, 6, 7, 8, 9, 10]  SMILES=C(CN=[CH2:1])C[CH3:1]  #Atome=6
+    Subgraph 4: Atom-Indices=[9, 10, 11]  SMILES=O=C=[NH:1]  #Atome=3
+
+  === Verarbeite Molekuel 1 ===
+  Subgraphen von [Mol 1]: 9 Stueck
+    Subgraph 0: Atom-Indices=[0, 1]  SMILES=C[CH3:1]  #Atome=2
+    Subgraph 1: Atom-Indices=[2, 3]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 2: Atom-Indices=[3, 4]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 3: Atom-Indices=[4, 5]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 4: Atom-Indices=[8, 7]  SMILES=[CH3:1][CH3:1]  #Atome=2
+    Subgraph 5: Atom-Indices=[8, 9]  SMILES=[CH3:1][NH2:1]  #Atome=2
+    Subgraph 6: Atom-Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]  #Atome=2
+    Subgraph 7: Atom-Indices=[10, 11]  SMILES=O=[CH2:1]  #Atome=2
+    Subgraph 8: Atom-Indices=[1, 2, 6, 7, 12, 13]  SMILES=c1c[CH:1]=[CH:1]c=[CH:1]1  #Atome=6
+
+    Schritt 2a: Feature-Berechnung fuer 9 Subgraphen
+      Subgraph 'C[CH3:1]': GNN-Feature(300-dim) + freq=0.632 + coverage=1/2
+      Subgraph '[CH3:1][NH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH2:1]=[NH:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph 'O=[CH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+      Subgraph '[CH3:1][NH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph '[CH2:1]=[NH:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph 'O=[CH2:1]': GNN-Feature(300-dim) + freq=0.982 + coverage=2/2
+      Subgraph 'c1c[CH:1]=[CH:1]c=[CH:1]1': GNN-Feature(300-dim) + freq=0.632 + coverage=1/2
+
+    Schritt 2b: Agent-Sampling (MLP entscheidet fuer jeden Subgraph: 0 oder 1)
+
+  Agent-Entscheidung (0=ignorieren, 1=selektieren):
+    Subgraph 0: action=1  >>> SELEKTIERT <<<  Indices=[0, 1]  SMILES=C[CH3:1]
+    Subgraph 1: action=1  >>> SELEKTIERT <<<  Indices=[2, 3]  SMILES=[CH3:1][NH2:1]
+    Subgraph 2: action=0      ignoriert  Indices=[3, 4]  SMILES=[CH2:1]=[NH:1]
+    Subgraph 3: action=1  >>> SELEKTIERT <<<  Indices=[4, 5]  SMILES=O=[CH2:1]
+    Subgraph 4: action=1  >>> SELEKTIERT <<<  Indices=[8, 7]  SMILES=[CH3:1][CH3:1]
+    Subgraph 5: action=1  >>> SELEKTIERT <<<  Indices=[8, 9]  SMILES=[CH3:1][NH2:1]
+    Subgraph 6: action=0      ignoriert  Indices=[9, 10]  SMILES=[CH2:1]=[NH:1]
+    Subgraph 7: action=1  >>> SELEKTIERT <<<  Indices=[10, 11]  SMILES=O=[CH2:1]
+    Subgraph 8: action=1  >>> SELEKTIERT <<<  Indices=[1, 2, 6, 7, 12, 13]  SMILES=c1c[CH:1]=[CH:1]c=[CH:1]1
+
+    Schritt 2c: Zusammenfuegen ueberlappender selektierter Subgraphen
+      Merged Subgraph 0: SMILES=C[CH3:1]  Indices=[0, 1]
+      Merged Subgraph 1: SMILES=[CH3:1][NH2:1]  Indices=[2, 3]
+      Merged Subgraph 2: SMILES=O=[CH2:1]  Indices=[4, 5]
+      Merged Subgraph 3: SMILES=C([CH3:1])[NH2:1]  Indices=[8, 9, 7]
+      Merged Subgraph 4: SMILES=O=[CH2:1]  Indices=[10, 11]
+      Merged Subgraph 5: SMILES=c1c[CH:1]=[CH:1]c=[CH:1]1  Indices=[1, 2, 6, 7, 12, 13]
+
+    Schritt 2d: Produktionsregeln generieren
+      -> NEUE Regel 3 [END] erzeugt!
+      -> NEUE Regel 4 [END] erzeugt!
+      -> NEUE Regel 5 [END] erzeugt!
+      -> Regel existiert bereits (Duplikat)
+      -> NEUE Regel 6 [END] erzeugt!
+
+    Nach Iteration -- verbleibende Subgraphen:
+  Subgraphen von [Mol 1]: 3 Stueck
+    Subgraph 0: Atom-Indices=[0, 1, 2, 3, 6, 7, 8, 9, 12, 13]  SMILES=Cc1c([NH2:1])cc(C[NH2:1])cc1  #Atome=10
+    Subgraph 1: Atom-Indices=[2, 3, 4, 5]  SMILES=O=C=N[CH3:1]  #Atome=4
+    Subgraph 2: Atom-Indices=[7, 8, 9, 10, 11]  SMILES=O=C=NC[CH3:1]  #Atome=5
+
+--- NACH der Iteration ---
+  Grammatik [nach 1 Iteration]: 7 Regeln
+    Regel 0 [END]: NT(degree=1) -> RHS(3 Atome: ['O', 'C', 'N'], 0 NT-Edges)
+    Regel 1 [END]: NT(degree=2) -> RHS(4 Atome: ['C', 'C', 'C', 'C'], 0 NT-Edges)
+    Regel 2 [END]: NT(degree=2) -> RHS(2 Atome: ['N', 'C'], 0 NT-Edges)
+    Regel 3 [END]: NT(degree=2) -> RHS(2 Atome: ['C', 'C'], 0 NT-Edges)
+    Regel 4 [END]: NT(degree=3) -> RHS(2 Atome: ['C', 'N'], 0 NT-Edges)
+    Regel 5 [END]: NT(degree=1) -> RHS(2 Atome: ['C', 'O'], 0 NT-Edges)
+    Regel 6 [END]: NT(degree=3) -> RHS(3 Atome: ['C', 'C', 'N'], 0 NT-Edges)
+
+  SubGraphSet: 7 unique Subgraphen
+    'O=C=N[CH3:1]': kommt 2x vor, in 2 Molekuel(en)
+    '[CH3:1][CH3:1]': kommt 1x vor, in 1 Molekuel(en)
+    'C(C[CH3:1])C[CH3:1]': kommt 1x vor, in 1 Molekuel(en)
+    'C(CN=[CH2:1])C[CH3:1]': kommt 1x vor, in 1 Molekuel(en)
+    'O=C=[NH:1]': kommt 1x vor, in 1 Molekuel(en)
+    'Cc1c([NH2:1])cc(C[NH2:1])cc1': kommt 1x vor, in 1 Molekuel(en)
+    'O=C=NC[CH3:1]': kommt 1x vor, in 1 Molekuel(en)
+
+
+======================================================================
+  PHASE 3: KOMPLETTER MCMC-DURCHLAUF (alle Iterationen)
+======================================================================
+
+
+    Was passiert hier? (Paper Sec. 4.1, S.5)
+    ------------------------------------------
+    Der MCMC-Durchlauf wiederholt die Iterationen aus Phase 2, bis ALLE
+    Hyperedges in ALLEN Molekuelen kontrahiert sind.
+
+    Am Ende: Jedes Molekuel ist zu einem einzigen NT-Knoten geschrumpft,
+    und die Grammatik enthaelt alle noetiegen Regeln um die Molekuele
+    (und neue!) zu erzeugen.
+
+  --- MCMC Iteration 0 ---
+    Verbleibende Subgraphen insgesamt: 20
+---for graph 0---
+Hyperedge sampling: [0 0 1 1 0 1 0 1 1 0 1]
+---for graph 1---
+Hyperedge sampling: [0 1 0 1 0 1 0 1 0]
+    Fertig? False
+    Grammatik hat jetzt 5 Regeln
+
+  --- MCMC Iteration 1 ---
+    Verbleibende Subgraphen insgesamt: 9
+---for graph 0---
+Hyperedge sampling: [0 1 0 0]
+---for graph 1---
+Hyperedge sampling: [1 0 0 0 0]
+    Fertig? False
+    Grammatik hat jetzt 7 Regeln
+
+  --- MCMC Iteration 2 ---
+    Verbleibende Subgraphen insgesamt: 7
+---for graph 0---
+Hyperedge sampling: [0 0 1]
+---for graph 1---
+Hyperedge sampling: [0 1 0 0]
+    Fertig? False
+    Grammatik hat jetzt 9 Regeln
+
+  --- MCMC Iteration 3 ---
+    Verbleibende Subgraphen insgesamt: 5
+---for graph 0---
+Hyperedge sampling: [0 1]
+---for graph 1---
+Hyperedge sampling: [1 1 0]
+    Fertig? False
+    Grammatik hat jetzt 11 Regeln
+
+  --- MCMC Iteration 4 ---
+    Verbleibende Subgraphen insgesamt: 2
+---for graph 0---
+Hyperedge sampling: [1]
+---for graph 1---
+Hyperedge sampling: [1]
+    Fertig? False
+    Grammatik hat jetzt 13 Regeln
+
+  --- MCMC Iteration 5 ---
+    Verbleibende Subgraphen insgesamt: 0
+    Fertig? True
+    Grammatik hat jetzt 13 Regeln
+
+    ALLE Hyperedges kontrahiert -- Grammatik-Konstruktion abgeschlossen!
+
+  Grammatik [fertige Grammatik]: 13 Regeln
+    Regel 0 [END]: NT(degree=2) -> RHS(3 Atome: ['N', 'C', 'C'], 0 NT-Edges)
+    Regel 1 [END]: NT(degree=2) -> RHS(2 Atome: ['C', 'C'], 0 NT-Edges)
+    Regel 2 [END]: NT(degree=1) -> RHS(2 Atome: ['C', 'O'], 0 NT-Edges)
+    Regel 3 [END]: NT(degree=3) -> RHS(2 Atome: ['C', 'N'], 0 NT-Edges)
+    Regel 4 [END]: NT(degree=2) -> RHS(2 Atome: ['C', 'N'], 0 NT-Edges)
+    Regel 5 [EXPANSION]: NT(degree=2) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 6 [END]: NT(degree=2) -> RHS(2 Atome: ['C', 'C'], 0 NT-Edges)
+    Regel 7 [EXPANSION]: NT(degree=1) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 8 [EXPANSION]: NT(degree=3) -> RHS(1 Atome: ['C'], 1 NT-Edges)
+    Regel 9 [EXPANSION]: NT(degree=1) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 10 [EXPANSION]: NT(degree=2) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 11 [START]: X (Initial) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 12 [START]: X (Initial) -> RHS(3 Atome: ['C', 'C', 'C'], 3 NT-Edges)
+
+
+======================================================================
+  PHASE 4: WARUM 5 MCMC SAMPLES?
+======================================================================
+
+
+    Kernfrage: Warum fuehren wir den Durchlauf 5x durch? (Paper Sec. 4.2, S.6)
+    ---------------------------------------------------------------------------
+    Der Agent entscheidet per Bernoulli-Sampling welche Subgraphen kontrahiert
+    werden. Das ist STOCHASTISCH -- verschiedene Durchlaeufe erzeugen
+    VERSCHIEDENE Grammatiken!
+
+    Die 5 Samples pro Epoche dienen dazu:
+    1. Verschiedene Grammatiken zu erzeugen (Exploration)
+    2. Jede Grammatik wird evaluiert (Diversity + Synthesizability)
+    3. Der Reward wird gemittelt/normalisiert (Varianzreduktion)
+    4. Der Agent lernt: welche Entscheidungen fuehren zu guten Grammatiken?
+
+    Denk daran wie ein A/B-Test: "Probiere 5 verschiedene Strategien,
+    schau welche am besten funktioniert, und lerne daraus."
+
+  === MCMC Sample 0 ===
+======MCMC iter0======
+---for graph 0---
+Hyperedge sampling: [1 0 1 1 1 1 1 0 0 1 0]
+---for graph 1---
+Hyperedge sampling: [1 1 1 0 1 0 0 1 1]
+Graph contraction status:  False
+======MCMC iter1======
+---for graph 0---
+Hyperedge sampling: [1 1 0 1]
+---for graph 1---
+Hyperedge sampling: [1 0 1 0]
+Graph contraction status:  False
+======MCMC iter2======
+---for graph 0---
+Hyperedge sampling: [1 0]
+---for graph 1---
+Hyperedge sampling: [0 1]
+Graph contraction status:  False
+======MCMC iter3======
+---for graph 0---
+Hyperedge sampling: [1]
+---for graph 1---
+Hyperedge sampling: [1]
+Graph contraction status:  False
+======MCMC iter4======
+Graph contraction status:  True
+    Iterationen: 4
+    Regeln: 12
+CC1=C=NC(=C2C=C(N=C=O)CC=CC(C)=C=N2)C=C(N=O)CC=C1
+O=C=O
+O=C=O
+CC(=C=O)CCN=C=O
+CC(=C=O)CCCCN=C=O
+O=C=NCCCCCCCCCCCN=C=O
+    Generierte Molekuele (5):
+      CC1=C=NC(=C2C=C(N=C=O)CC=CC(C)=C=N2)C=C(N=O)CC=C1
+      O=C=O
+      CC(=C=O)CCN=C=O
+      CC(=C=O)CCCCN=C=O
+      O=C=NCCCCCCCCCCCN=C=O
+    Diversity: 0.7983
+
+  === MCMC Sample 1 ===
+======MCMC iter0======
+---for graph 0---
+Hyperedge sampling: [1 0 0 0 1 0 1 0 1 0 0]
+---for graph 1---
+Hyperedge sampling: [0 0 0 0 1 0 1 1 1]
+Graph contraction status:  False
+======MCMC iter1======
+---for graph 0---
+Hyperedge sampling: [1 0 1 0 0]
+---for graph 1---
+Hyperedge sampling: [1 1 0 0 0 1]
+Graph contraction status:  False
+======MCMC iter2======
+---for graph 0---
+Hyperedge sampling: [0 1]
+---for graph 1---
+Hyperedge sampling: [1 0 1 1]
+Graph contraction status:  False
+======MCMC iter3======
+---for graph 0---
+Hyperedge sampling: [1]
+---for graph 1---
+Hyperedge sampling: [1]
+Graph contraction status:  False
+======MCMC iter4======
+Graph contraction status:  True
+    Iterationen: 4
+    Regeln: 10
+CC1=C(N=C=O)C=C(N=C=O)CC=C1
+O=C=NCN=C=O
+O=C=NCN=C=O
+O=C=NN=C=O
+O=C=NN=C=O
+Cc1ccc(CN=C=O)cc1N=C=O
+O=C=NCCN=C=O
+    Generierte Molekuele (5):
+      CC1=C(N=C=O)C=C(N=C=O)CC=C1
+      O=C=NCN=C=O
+      O=C=NN=C=O
+      Cc1ccc(CN=C=O)cc1N=C=O
+      O=C=NCCN=C=O
+    Diversity: 0.7917
+
+  === MCMC Sample 2 ===
+======MCMC iter0======
+---for graph 0---
+Hyperedge sampling: [0 0 0 0 0 0 0 0 1 0 0]
+---for graph 1---
+Hyperedge sampling: [0 1 1 0 1 0 0 1 0]
+Graph contraction status:  False
+======MCMC iter1======
+---for graph 0---
+Hyperedge sampling: [0 0 0 1 1 0 0 0 0]
+---for graph 1---
+Hyperedge sampling: [1 0 0 0 1]
+Graph contraction status:  False
+======MCMC iter2======
+---for graph 0---
+Hyperedge sampling: [1 1 1 1 1 1 0]
+---for graph 1---
+Hyperedge sampling: [0 0 1]
+Graph contraction status:  False
+======MCMC iter3======
+---for graph 0---
+Hyperedge sampling: [1]
+---for graph 1---
+Hyperedge sampling: [1 0]
+Graph contraction status:  False
+======MCMC iter4======
+---for graph 0---
+---for graph 1---
+Hyperedge sampling: [1]
+Graph contraction status:  False
+======MCMC iter5======
+Graph contraction status:  True
+    Iterationen: 5
+    Regeln: 11
+O=C=O
+O=C=NCN=O
+O=C=O
+O=C=NCCCCCCN=C=NN=C=O
+O=C=NCCCCCCN=C=O
+O=C=NCCCCCCN=C=NN=C=O
+O=C=NCCCCCCN=C=O
+O=C=NCCCCCCN=C=O
+O=C=NCCCCCCN=C=O
+O=C=NN=C=O
+    Generierte Molekuele (5):
+      O=C=O
+      O=C=NCN=O
+      O=C=NCCCCCCN=C=NN=C=O
+      O=C=NCCCCCCN=C=O
+      O=C=NN=C=O
+    Diversity: 0.7373
+
+  --- Vergleich der 3 Samples ---
+  Sample   #Regeln    #Generiert   Diversity
+  ----------------------------------------
+  0        12         5            0.7983
+  1        10         5            0.7917
+  2        11         5            0.7373
+
+  -> Jedes Sample erzeugt eine ANDERE Grammatik mit anderen Eigenschaften!
+     Der REINFORCE-Algorithmus nutzt diese Varianz zum Lernen.
+
+
+======================================================================
+  PHASE 5: REINFORCE TRAINING (eine Epoche)
+======================================================================
+
+
+    Was passiert hier? (Paper Sec. 4.2, Eq. 3+4, S.6)
+    ---------------------------------------------------
+    Eine Epoche des Trainings:
+    1. Fuer N=3 MCMC-Samples: Grammatik konstruieren + evaluieren
+    2. Reward R = diversity + 2 * syn_rate berechnen
+       (Wir nutzen einen Dummy fuer syn_rate)
+    3. Returns normalisieren (- mean) als Baseline
+    4. Policy Loss = -sum(log_prob * gamma^(T-t) * R)
+    5. Backpropagation + Optimizer Step
+
+    Das ist REINFORCE (Williams, 1992): der Agent lernt welche
+    Selektions-Entscheidungen zu hohen Rewards fuehren.
+
+  === Sample 0/3 ===
+======MCMC iter0======
+---for graph 0---
+Hyperedge sampling: [0 1 0 0 0 0 1 1 1 1 1]
+---for graph 1---
+Hyperedge sampling: [1 0 1 1 0 1 1 0 0]
+Graph contraction status:  False
+======MCMC iter1======
+---for graph 0---
+Hyperedge sampling: [0 0 1 0 0]
+---for graph 1---
+Hyperedge sampling: [0 0 0 1]
+Graph contraction status:  False
+======MCMC iter2======
+---for graph 0---
+Hyperedge sampling: [1 1 1 0]
+---for graph 1---
+Hyperedge sampling: [0 1 0]
+Graph contraction status:  False
+======MCMC iter3======
+---for graph 0---
+Hyperedge sampling: [1]
+---for graph 1---
+Hyperedge sampling: [1 0]
+Graph contraction status:  False
+======MCMC iter4======
+---for graph 0---
+---for graph 1---
+Hyperedge sampling: [1]
+Graph contraction status:  False
+======MCMC iter5======
+Graph contraction status:  True
+O=C=NN=C=O
+O=C=NCCCCCCCCCN=C=O
+O=C=NCCCCCCN=C=O
+O=C=NN=C=O
+CC(=O)CCCC(C)=O
+O=C=NCCCCC1=C=NCC=CC(N=C=O)=C1
+O=C=NCCCCCN=C=O
+O=C=NCCCCCN=C=O
+CC(=O)c1ccc(C)c(CN=C=O)c1
+Cc1ccc(CN=C=O)cc1CCCCN=C=O
+O=C=NN=C=O
+O=C=NCCCN=C=O
+Cc1ccc(N=C=O)cc1CCN=C=O
+    Regeln: 12  |  Generiert: 10  |  Diversity: 0.7312  |  Syn(dummy): 0.3675  |  R = 1.4661
+  === Sample 1/3 ===
+======MCMC iter0======
+---for graph 0---
+Hyperedge sampling: [1 0 0 0 0 0 1 0 1 1 0]
+---for graph 1---
+Hyperedge sampling: [0 0 1 0 0 1 1 1 1]
+Graph contraction status:  False
+======MCMC iter1======
+---for graph 0---
+Hyperedge sampling: [0 0 0 0 1 1]
+---for graph 1---
+Hyperedge sampling: [1 1 0 1]
+Graph contraction status:  False
+======MCMC iter2======
+---for graph 0---
+Hyperedge sampling: [0 0 1 1]
+---for graph 1---
+Hyperedge sampling: [1]
+Graph contraction status:  False
+======MCMC iter3======
+---for graph 0---
+Hyperedge sampling: [1 0]
+---for graph 1---
+Graph contraction status:  False
+======MCMC iter4======
+---for graph 0---
+Hyperedge sampling: [1]
+---for graph 1---
+Graph contraction status:  False
+======MCMC iter5======
+Graph contraction status:  True
+Cc1ccc(N=C=O)cc1CN=C=O
+Cc1ccc(CN=C=O)cc1N=C=C=O
+Cc1ccc(CN=C=O)cc1N=C=O
+O=C=O
+O=C=C=O
+O=C=C=O
+Cc1ccc(CN=C=O)cc1N=C=NN=C=O
+O=C=O
+O=C=NCCCCN=C=O
+O=C=C=NN=C=NN=C=O
+Cc1ccc(CN=C=O)c(N=C=C=NN=C=NN=C=O)c1
+O=C=C=O
+Cc1ccc(CN=C=O)c(N=C=O)c1
+    Regeln: 11  |  Generiert: 10  |  Diversity: 0.7760  |  Syn(dummy): 0.1903  |  R = 1.1567
+  === Sample 2/3 ===
+======MCMC iter0======
+---for graph 0---
+Hyperedge sampling: [1 1 1 1 0 1 0 1 1 1 1]
+---for graph 1---
+Hyperedge sampling: [0 0 0 1 1 0 0 0 1]
+Graph contraction status:  False
+======MCMC iter1======
+---for graph 0---
+Hyperedge sampling: [1 1]
+---for graph 1---
+Hyperedge sampling: [1 1 1 0 0]
+Graph contraction status:  False
+======MCMC iter2======
+---for graph 0---
+---for graph 1---
+Hyperedge sampling: [1 0]
+Graph contraction status:  False
+======MCMC iter3======
+---for graph 0---
+---for graph 1---
+Hyperedge sampling: [1]
+Graph contraction status:  False
+======MCMC iter4======
+Graph contraction status:  True
+O=C=NCCN=C=O
+O=C=C=O
+O=C=C=O
+CCc1ccc(N=C=O)c(CCCc2ccc(N=NCCN=C=O)c(C)c2)c1
+O=C=NCCCCCCN=C=O
+Cc1cc(CCCCCN=C=O)ccc1N=C=O
+O=C=NCCCCCCN=C=O
+O=C=C=O
+CCc1ccc(CCCCN=C=O)c(N=C=O)c1
+Cc1cc(CCCCCN=C=O)ccc1N=C=O
+O=C=NCCCCCCN=C=O
+Cc1ccc(CCCCCN=C=O)cc1N=C=O
+CCc1ccc(N=C=O)c(CCCCN=C=O)c1
+O=C=NCCN=C=O
+O=C=C=O
+O=C=NCCN=NCCN=C=O
+CCc1ccc(CCCCN=C=O)c(N=NCCN=C=O)c1
+    Regeln: 8  |  Generiert: 10  |  Diversity: 0.7047  |  Syn(dummy): 0.3780  |  R = 1.4607
+
+  --- Policy Loss Berechnung ---
+  Rohe Returns:        ['1.4661', '1.1567', '1.4607']
+  Normalisierte Returns: ['0.1050', '-0.2045', '0.0995']
+    (Subtraktion des Mittelwerts = Baseline fuer Varianzreduktion)
+
+  Gesamte Entscheidungen: 18
+  Policy Loss: -0.328252
+
+  --- Backpropagation ---
+  Gewichte vorher (erste 3): [-0.02210087887942791, 0.03957704082131386, -0.009498707950115204]
+  Gewichte nachher (erste 3): [-0.012101303786039352, 0.0495770126581192, 0.0005012517794966698]
+  Differenz:                  [0.009999575093388557, 0.009999971836805344, 0.009999959729611874]
+
+  -> Die Gewichte haben sich geaendert! Der Agent lernt.
+     Nach vielen Epochen wird er bessere Selektions-Entscheidungen treffen.
+
+
+======================================================================
+  PHASE 6: MOLEKUEL-GENERIERUNG AUS DER GRAMMATIK
+======================================================================
+
+
+    Was passiert hier? (Paper Sec. 3, S.4 + Appendix A, S.13)
+    -----------------------------------------------------------
+    Die gelernte Grammatik wird wie eine formale Grammatik benutzt:
+    1. Starte mit dem Initial-Symbol X (leerer Hypergraph)
+    2. Waehle eine Start-Regel und wende sie an
+    3. Iterativ: finde NT-Knoten, waehle passende Regel, ersetze
+    4. Stoppe wenn keine NT-Knoten mehr vorhanden
+
+    Wichtig: End-Regeln werden mit steigender Iteration wahrscheinlicher
+    (prob = exp(0.5 * iter * is_ending)), damit die Generierung terminiert.
+
+  Verfuegbare Grammatik:
+  Grammatik [fuer Generierung]: 12 Regeln
+    Regel 0 [END]: NT(degree=1) -> RHS(2 Atome: ['O', 'C'], 0 NT-Edges)
+    Regel 1 [END]: NT(degree=2) -> RHS(6 Atome: ['N', 'C', 'C', 'C', 'C', 'C'], 0 NT-Edges)
+    Regel 2 [END]: NT(degree=2) -> RHS(2 Atome: ['C', 'C'], 0 NT-Edges)
+    Regel 3 [END]: NT(degree=3) -> RHS(3 Atome: ['C', 'N', 'C'], 0 NT-Edges)
+    Regel 4 [END]: NT(degree=3) -> RHS(2 Atome: ['C', 'C'], 0 NT-Edges)
+    Regel 5 [EXPANSION]: NT(degree=1) -> RHS(1 Atome: ['N'], 1 NT-Edges)
+    Regel 6 [EXPANSION]: NT(degree=1) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 7 [EXPANSION]: NT(degree=2) -> RHS(4 Atome: ['C', 'C', 'N', 'C'], 3 NT-Edges)
+    Regel 8 [EXPANSION]: NT(degree=1) -> RHS(1 Atome: ['C'], 1 NT-Edges)
+    Regel 9 [EXPANSION]: NT(degree=1) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 10 [START]: X (Initial) -> RHS(0 Atome: [], 2 NT-Edges)
+    Regel 11 [START]: X (Initial) -> RHS(1 Atome: ['O'], 1 NT-Edges)
+
+  --- Generierung von 10 Molekuelen ---
+
+O=C=O
+  Molekuel 1: O=C=O  (in 2 Iterationen)
+O=C=C1C=C(CN=O)C=CCCCCCN=C=N1
+  Molekuel 2: O=C=C1C=C(CN=O)C=CCCCCCN=C=N1  (in 7 Iterationen)
+CC(=C=O)N=NCC1=CC(N=C=C=O)=NCCCCCC=C1
+  Molekuel 3: CC(=C=O)N=NCC1=CC(N=C=C=O)=NCCCCCC=C1  (in 11 Iterationen)
+CC(=C=O)CN=C=O
+  Molekuel 4: CC(=C=O)CN=C=O  (in 7 Iterationen)
+Cc1ccc(CN=C=O)cc1N=C=O
+  Molekuel 5: Cc1ccc(CN=C=O)cc1N=C=O  (in 7 Iterationen)
+CC(=C=O)CCCCCN=C=O
+  Molekuel 6: CC(=C=O)CCCCCN=C=O  (in 7 Iterationen)
+O=C=O
+O=C=NCCCCCCCCCCN=C=O
+  Molekuel 7: O=C=NCCCCCCCCCCN=C=O  (in 7 Iterationen)
+O=C=NN=C=O
+  Molekuel 8: O=C=NN=C=O  (in 5 Iterationen)
+O=C=NCCCCCCCCCCCCCN=C=O
+  Molekuel 9: O=C=NCCCCCCCCCCCCCN=C=O  (in 10 Iterationen)
+O=C=NN=C=O
+O=C=O
+O=C=O
+O=C=C=NC1=NCCCCCC=CC(CN=O)=C1
+  Molekuel 10: O=C=C=NC1=NCCCCCC=CC(CN=O)=C1  (in 7 Iterationen)
+
+  -> 10 einzigartige Molekuele generiert!
+
+  Diversity (Tanimoto): 0.8050
+  -> Bild gespeichert: bilder/phase6_generated.png
+
+######################################################################
+  FERTIG!
+######################################################################
+
+
+    Zusammenfassung:
+    ================
+    Phase 1: SMILES -> Hypergraph -> Subgraphen (Datenrepraesentation)
+    Phase 2: Eine Iteration = Agent selektiert + Regeln extrahiert
+    Phase 3: Wiederhole bis alles kontrahiert = fertige Grammatik
+    Phase 4: 5 Samples = 5 verschiedene stochastische Grammatiken
+    Phase 5: REINFORCE = lerne welche Entscheidungen gut sind
+    Phase 6: Grammatik anwenden = neue Molekuele generieren
+
+    Im echten Training:
+    - 50 Epochen (jede mit 5 Samples)
+    - 100 generierte Molekuele pro Evaluation
+    - Retro* fuer echte Synthesizability
+    - Reward = diversity + 2 * syn_rate
+
+    Bilder findest du in: verstehen/bilder/
+
