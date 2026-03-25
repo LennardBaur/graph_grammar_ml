@@ -1,545 +1,735 @@
-# DEG: Paper-zu-Code Dokumentation
+# DEG Paper: Detaillierte Schritt-fuer-Schritt Dokumentation
 
-> **Paper:** "Data-Efficient Graph Grammar Learning for Molecular Generation" (ICLR 2022)
-> **Autoren:** Minghao Guo, Veronika Thost, Beichen Li, Payel Das, Jie Chen, Wojciech Matusik
+## Paper-Referenz
+**"Data-Efficient Graph Grammar Learning for Molecular Generation"** (ICLR 2022, Oral)
+Autoren: Minghao Guo, Veronika Thost, Beichen Li, Payel Das, Jie Chen, Wojciech Matusik
 
 ---
 
 ## Inhaltsverzeichnis
 
 1. [Gesamtueberblick](#1-gesamtueberblick)
-2. [Arbeitspaket 1: Datenverarbeitung & Hypergraph-Repraesentation](#arbeitspaket-1)
-3. [Arbeitspaket 2: Bottom-Up Grammatik-Konstruktion](#arbeitspaket-2)
-4. [Arbeitspaket 3: Agent (Potential Function) & Feature-Extraktion](#arbeitspaket-3)
-5. [Arbeitspaket 4: REINFORCE Training Loop](#arbeitspaket-4)
-6. [Arbeitspaket 5: Grammatik-Produktion (Molekuel-Generierung)](#arbeitspaket-5)
-7. [Arbeitspaket 6: Evaluation & Metriken](#arbeitspaket-6)
-8. [Arbeitspaket 7: Retro-Star Synthesizability](#arbeitspaket-7)
+2. [Phase 1: Datenverarbeitung](#2-phase-1-datenverarbeitung)
+   - 2.1 SMILES einlesen
+   - 2.2 Molekuel → Hypergraph
+   - 2.3 Cluster / Subgraphen finden
+   - 2.4 GNN-Features extrahieren
+   - 2.5 SubGraphSet aufbauen
+3. [Phase 2: Eine MCMC-Iteration](#3-phase-2-eine-mcmc-iteration)
+   - 3.1 Feature-Vektor zusammenbauen (302-dim)
+   - 3.2 Agent-Sampling (Bernoulli)
+   - 3.3 Ueberlappende Subgraphen mergen
+   - 3.4 Produktionsregel erzeugen
+   - 3.5 Hypergraph aktualisieren
+4. [Phase 3: Kompletter MCMC-Durchlauf](#4-phase-3-kompletter-mcmc-durchlauf)
+5. [Phase 4: Warum 5 MCMC Samples?](#5-phase-4-warum-5-mcmc-samples)
+6. [Phase 5: REINFORCE Training](#6-phase-5-reinforce-training)
+   - 6.1 Reward-Berechnung
+   - 6.2 Policy Loss
+   - 6.3 Backpropagation
+7. [Phase 6: Molekuel-Generierung](#7-phase-6-molekuel-generierung)
+8. [Glossar / Symboltabelle](#8-glossar)
 
 ---
 
 ## 1. Gesamtueberblick
 
-### Was macht das System?
+**Paper:** Figure 1 (S.2) zeigt den Gesamtablauf:
 
-Das System lernt eine **Graph-Grammatik** aus wenigen Molekuelen (~20) und kann damit neue, valide und synthetisierbare Molekuele generieren.
+```
+Training Data (20 Molekuele)
+    |
+    v
+Bottom-up Search (MCMC, gesteuert durch Agent F_theta)
+    |
+    v
+Graph Grammar (Produktionsregeln)
+    |
+    v
+Grammar Production (Regelanwendung)
+    |
+    v
+Generated Samples
+    |
+    v
+Evaluation (Diversity + Retro*) ---> Reward ---> REINFORCE ---> Update F_theta
+```
 
-**Paper Sec. 1, S.1 + Figure 1 (S.2):**
-Der Ablauf ist:
-1. **Training Data** (SMILES) -> Molekuele als Hypergraphen darstellen
-2. **Bottom-Up Search** -> Hyperedges iterativ kontrahieren, dabei Produktionsregeln extrahieren
-3. **Graph Grammar** -> Sammlung von Produktionsregeln (LHS -> RHS)
-4. **Grammar Production** -> Regeln anwenden um neue Molekuele zu erzeugen
-5. **Evaluation** -> Diversity + Synthesizability messen
-6. **Update Edge Weight Function F_theta** -> Agent (MLP) per REINFORCE optimieren
+**Code-Einstiegspunkt:** `main.py`, Zeilen 97-174 (`learn()`)
 
-### Hauptdateien und ihre Rollen
-
-| Datei | Rolle | Paper-Bezug |
-|-------|-------|-------------|
-| `main.py` | Training-Loop (50 Epochen, 5 MCMC Samples, Policy Gradient) | Sec. 4.2, Algorithmus |
-| `grammar_generation.py` | Datenverarbeitung, Grammatik-Konstruktion, MCMC, Produktion | Sec. 4.1 + 4.2 |
-| `agent.py` | Agent MLP (F_theta) + Sampling | Sec. 4.2 (Eq. 2) |
-| `private/grammar.py` | ProductionRule, ProductionRuleCorpus, generate_rule() | Sec. 3 + 4.1 (Eq. 1) |
-| `private/hypergraph.py` | Hypergraph-Klasse, mol_to_hg(), hg_to_mol() | Sec. 3 (Molecular Hypergraph) |
-| `private/molecule_graph.py` | MolGraph, SubGraph, InputGraph, MolKey | Sec. 4.1 (Datenstrukturen) |
-| `private/subgraph_set.py` | SubGraphSet (molekueluebergreifendes Subgraph-Tracking) | Sec. 4.1 (simultane Konstruktion) |
-| `private/metrics.py` | InternalDiversity (Tanimoto) | Sec. 5.1 |
-| `GCN/feature_extract.py` | Pretrained GIN Feature Extractor f(e) | Sec. 4.2 + Appendix B |
-| `retro_star_listener.py` | Retro* Worker-Prozess (File-IPC) | Sec. 5.1 (RS Metrik) |
+```
+Epoche 1..50:
+  fuer jedes der 5 MCMC-Samples:
+    1. Kopiere Eingabedaten
+    2. MCMC_sampling() -> fertige Grammatik
+    3. random_produce() x100 -> generierte Molekuele
+    4. Evaluate -> diversity + syn_rate -> Reward R
+  Policy Loss berechnen (REINFORCE)
+  Backprop + Optimizer Step
+```
 
 ---
 
-## Arbeitspaket 1: Datenverarbeitung & Hypergraph-Repraesentation <a name="arbeitspaket-1"></a>
+## 2. Phase 1: Datenverarbeitung
 
-### Paper-Kontext
+> **Paper:** Section 3 "Preliminaries" (S.3-4)
+> **Code:** `grammar_generation.py`, Zeilen 13-54 (`data_processing()`)
 
-**Paper Sec. 3, "Molecular Hypergraph" (S.3):**
-> Molekuele werden als Hypergraphen dargestellt: H_M = (V, E_H).
-> - Jeder Bond der nur 2 Atome verbindet -> eine Hyperedge
-> - Jeder Ring (inkl. aromatisch) -> eine Hyperedge die alle Atome des Rings verbindet
-> Siehe Figure 2(a) fuer ein Beispiel (Naphthalin-Diisocyanat).
+### 2.1 SMILES einlesen
 
-### Code-Ablauf
+**Was passiert:** Rohe SMILES-Strings werden gelesen.
 
-#### Schritt 1: SMILES einlesen
-**Datei:** `main.py:197-202`
-```
-Liest die Trainingsdaten aus einer Textdatei (z.B. datasets/isocyanates.txt).
-Entfernt Duplikate.
+**Code:** `main.py`, Zeilen 188-191
+```python
+with open(args.training_data) as f:
+    smiles_list = [line.strip() for line in f.readlines()]
 ```
 
-#### Schritt 2: data_processing()
-**Datei:** `grammar_generation.py:13-54`
+**Output-Beispiel:**
+```
+[Molekuel 0]
+  SMILES:     O=C=NCCCCCCN=C=O
+  #Atome:     12
+  #Bindungen: 11
+  #Ringe:     0
 
-Fuer jedes Molekuel:
-1. **Kekulisierung** (Z.24): `smiles = get_smiles(get_mol(smiles))` -- stellt sicher, dass aromatische Bindungen explizit als Einzel-/Doppelbindungen dargestellt werden.
+[Molekuel 1]
+  SMILES:     CC1=C(C=C(C=C1)CN=C=O)N=C=O
+  #Atome:     14
+  #Bindungen: 14
+  #Ringe:     1
+    Ring 0: Atome [1, 6, 5, 4, 3, 2] = ['C', 'C', 'C', 'C', 'C', 'C']
+```
 
-2. **Cluster-Findung** (Z.28-36):
-   - Ohne `--motif`: `find_clusters(mol)` aus `fuseprop` -- findet Ringe und einzelne Bindungen als Cluster
-   - Mit `--motif`: `find_fragments(mol)` -- findet groessere Motive (fuer Polymere)
-   - **Paper-Bezug:** Sec. 3 -- "a hyperedge is added for each bond that joins only two nodes, and for each individual ring"
-
-3. **SubGraph-Objekte erstellen** (Z.38-43): Fuer jeden Cluster wird ein `SubGraph` erzeugt
-   - `SubGraph` erbt von `MolGraph` (`private/molecule_graph.py:89-97`)
-   - Speichert: `mol` (RDKit Mol), `mapping_to_input_mol`, `subfrags` (Atom-Indices)
-
-4. **InputGraph erstellen** (Z.48): `InputGraph(mol, smiles, subgraphs, subgraphs_idx, GNN_model_path)`
-   - **Datei:** `private/molecule_graph.py:100-116`
-   - Erzeugt intern den Hypergraphen: `self.hypergraph = mol_to_hg(mol)` (Z.15 in MolGraph.__init__)
-
-5. **SubGraphSet erstellen** (Z.53): Trackt identische Subgraphen ueber alle Molekuele hinweg
-   - **Datei:** `private/subgraph_set.py:3-36`
-   - `map_to_input`: Dict das fuer jeden unique Subgraph zaehlt: In welchen Molekuelen kommt er vor? Wie oft insgesamt?
-
-#### Schritt 3: Molekuel -> Hypergraph Konvertierung
-**Datei:** `private/hypergraph.py` -- Funktion `mol_to_hg()` (suche nach `def mol_to_hg`)
-
-Die `Hypergraph`-Klasse (Z.15-36):
-- Nutzt intern `nx.Graph` als bipartiten Graph
-- `nodes`: Repraesentieren Bonds/Bindungen (Knotenattribut: `BondSymbol`)
-- `edges`: Repraesentieren Atome/Hyperedges (Kantenattribut: `TSymbol` fuer terminal, `NTSymbol` fuer nicht-terminal)
-- **ACHTUNG Namenskonvention:** Im Code sind "nodes" = Bonds und "edges" = Atome/Hyperedges (umgekehrt zur Intuition!)
+HDI ist eine lineare Kette (kein Ring), TDI hat einen Benzolring.
 
 ---
 
-## Arbeitspaket 2: Bottom-Up Grammatik-Konstruktion <a name="arbeitspaket-2"></a>
+### 2.2 Molekuel → Hypergraph
 
-### Paper-Kontext
+> **Paper:** Section 3, S.3: "Given a molecule M, we derive a hypergraph H_M = (V, E_H)"
+> **Paper:** Figure 2a (S.4): Zeigt die Hypergraph-Darstellung von Naphthalin-Diisocyanat
 
-**Paper Sec. 4.1, "Bottom-up Grammar Construction" (S.5) + Figure 3 (S.5):**
-> Ein Bottom-Up-Verfahren baut Produktionsregeln auf, indem es iterativ Hyperedges kontrahiert.
-> In jeder Iteration t:
-> 1. Betrachte den aktuellen Hypergraphen H_{M,t}
-> 2. Sample eine Menge von Hyperedges E_t* (via Potential Function F_theta)
-> 3. Extrahiere verbundene Komponenten
-> 4. Konvertiere jede Komponente in eine Produktionsregel (Eq. 1)
-> 5. Ersetze die Komponenten durch NT-Knoten -> neuer Hypergraph H_{M,t+1}
+**Kernidee:** Ein Molekuel wird als Hypergraph dargestellt, wobei:
+- **Hyperedges** = Atome (oder ganze Ringe als eine Hyperedge)
+- **Knoten** = Bindungen zwischen Atomen
 
-**Paper Eq. 1 (S.5):**
+**Code:** `private/hypergraph.py`, Zeilen 722-759 (`mol_to_hg()`)
+```python
+def mol_to_hg(mol, kekulize, add_Hs):
+    bipartite_g = mol_to_bipartite(mol, kekulize)  # Zeile 747
+    hg = Hypergraph()                               # Zeile 748
+    for each_atom in [...]:                          # Zeile 749
+        node_set = set([])
+        for each_bond in bipartite_g.adj[each_atom]:
+            hg.add_node(each_bond, ...)              # Knoten = Bindung
+            node_set.add(each_bond)
+        hg.add_edge(node_set, ...)                   # Hyperedge = Atom
+    return hg
 ```
-LHS := H(V_L, E_L), V_L = {R*} union V_anc, E_L = {(R*, v) | v in V_anc}
-RHS := H(V_R, E_R), V_R = V_sub union V_anc, E_R = E_anc union E_sub
+
+**Output-Beispiel (HDI = O=C=NCCCCCCN=C=O):**
 ```
-- V_anc = Anchor-Knoten (verbinden die Substruktur mit dem Rest des Molekuels)
-- R* = Non-Terminal Knoten
-- LHS hat einen NT-Knoten mit Anchor-Knoten
-- RHS hat die vollstaendige Substruktur plus Anchor-Knoten
+Hypergraph [Mol 0]:
+  #Knoten (=Bonds): 11  |  #Edges (=Atome/Hyperedges): 12
+  Edges (= Atome/Gruppen):
+    e0: O (T) -- Knoten: bond_0(bond_type=2)          <- Sauerstoff, eine Doppelbindung
+    e1: C (T) -- Knoten: bond_0(bond_type=2), bond_1(bond_type=2)  <- Kohlenstoff, zwei Doppelbindungen
+    e2: N (T) -- Knoten: bond_1(bond_type=2), bond_2(bond_type=1)  <- Stickstoff, Doppel+Einfach
+    ...
+```
 
-### Code-Ablauf
+**Erklaerung:** Jeder Eintrag "e0: O (T)" bedeutet:
+- `e0` = Hyperedge-ID (= Atom-Index)
+- `O` = Atomsymbol (Sauerstoff)
+- `(T)` = Terminal (= echtes Atom, kein Platzhalter)
+- `bond_0(bond_type=2)` = Diese Hyperedge ist mit bond_0 verbunden, einer Doppelbindung
 
-#### MCMC_sampling()
-**Datei:** `grammar_generation.py:120-133`
+Fuer TDI mit dem Benzolring werden die 6 Ring-Atome NICHT in eine Ring-Hyperedge zusammengefasst (das passiert erst im naechsten Schritt bei den Subgraphen).
+
+---
+
+### 2.3 Cluster / Subgraphen finden
+
+> **Paper:** Section 3, S.3-4: "We use the BRICS decomposition or tree decomposition"
+> **Code:** `grammar_generation.py`, Zeilen 20-40 (innerhalb `data_processing()`)
+
+**Was passiert:**
+1. RDKit's `GetSymmSSSR()` findet alle Ringe
+2. Einzelne Bindungen werden als Atom-Paare extrahiert
+3. Ringe werden als Multi-Atom-Cluster behandelt
+4. Jeder Cluster = ein `SubGraph`-Objekt
+
+**Code:** `private/molecule_graph.py`, Zeilen 100-135 (`InputGraph.__init__()`)
+
+**Output-Beispiel (HDI, keine Ringe):**
+```
+Subgraphen von [Mol 0]: 11 Stueck
+  Subgraph 0: Atom-Indices=[0, 1]   SMILES=O=[CH2:1]       <- O=C Bindung
+  Subgraph 1: Atom-Indices=[1, 2]   SMILES=[CH2:1]=[NH:1]  <- C=N Bindung
+  Subgraph 2: Atom-Indices=[2, 3]   SMILES=[CH3:1][NH2:1]  <- N-C Bindung
+  Subgraph 3: Atom-Indices=[3, 4]   SMILES=[CH3:1][CH3:1]  <- C-C Bindung
+  ...
+```
+
+**Output-Beispiel (TDI, mit Benzolring):**
+```
+Subgraphen von [Mol 1]: 9 Stueck
+  Subgraph 0: Atom-Indices=[0, 1]                SMILES=C[CH3:1]               <- Methyl-Gruppe
+  Subgraph 1: Atom-Indices=[2, 3]                SMILES=[CH3:1][NH2:1]         <- C-N Bindung
+  ...
+  Subgraph 8: Atom-Indices=[1, 2, 6, 7, 12, 13] SMILES=c1c[CH:1]=[CH:1]c=[CH:1]1  <- BENZOLRING als ein Subgraph!
+```
+
+**Wichtig:** Der Benzolring (6 Atome) wird als EIN Subgraph behandelt, nicht als 6 einzelne.
+Dies ist der Unterschied zwischen Hypergraph und normalem Graph -- eine Hyperedge kann mehr als 2 Knoten verbinden!
+
+---
+
+### 2.4 GNN-Features extrahieren
+
+> **Paper:** Section 4.2, S.6 + Appendix B, S.13: "pretrained GIN from Hu et al. (2019)"
+> **Code:** `GCN/feature_extract.py` (feature_extractor Klasse)
+
+**Was passiert:** Ein vortrainiertes Graph Isomorphism Network (GIN) erzeugt fuer jedes Atom
+einen 300-dimensionalen Embedding-Vektor. Fuer einen Subgraphen mit N Atomen werden
+die N Atom-Embeddings **gemittelt** zu einem einzigen 300-dim Vektor.
+
+**Code:** `private/molecule_graph.py`, Zeilen 137-144 (`get_subg_feature_for_agent()`)
+```python
+def get_subg_feature_for_agent(self, subg):
+    atom_features = self.gnn_features  # 300-dim pro Atom
+    subg_atoms = subg.subfrags         # Atom-Indices des Subgraphen
+    return atom_features[subg_atoms].mean(axis=0)  # Mittelwert -> 300-dim
+```
+
+**Das GIN wird NICHT trainiert** -- es ist ein eingefrorener Feature-Extraktor.
+Geladen aus: `GCN/model_gin/supervised_contextpred.pth`
+
+---
+
+### 2.5 SubGraphSet aufbauen
+
+> **Paper:** Section 4.2, S.6: Die zwei Zusatz-Features (Haeufigkeit + Abdeckung)
+> **Code:** `private/subgraph_set.py`, Zeilen 3-36 (`SubGraphSet`)
+
+**Was passiert:** Das SubGraphSet trackt fuer jeden einzigartigen Subgraphen:
+1. **Haeufigkeit:** Wie oft kommt er insgesamt vor?
+2. **Abdeckung:** In wie vielen verschiedenen Molekuelen kommt er vor?
+
+**Code:** `private/subgraph_set.py`, Zeilen 10-36 (`get_map_to_input()`)
+```python
+# map_to_input[MolKey(subg)] = [{input_mol_key: [(idx, subg), ...]}, count]
+```
+
+**Output-Beispiel:**
+```
+SubGraphSet: 6 unique Subgraphen
+  'O=[CH2:1]':                     kommt 4x vor, in 2 Molekuel(en)  <- In BEIDEN Mol.
+  '[CH2:1]=[NH:1]':                kommt 4x vor, in 2 Molekuel(en)  <- N=C=O Motiv
+  '[CH3:1][NH2:1]':                kommt 4x vor, in 2 Molekuel(en)
+  '[CH3:1][CH3:1]':                kommt 6x vor, in 2 Molekuel(en)  <- C-C am haeufigsten
+  'C[CH3:1]':                      kommt 1x vor, in 1 Molekuel(en)  <- Nur in TDI (Methyl)
+  'c1c[CH:1]=[CH:1]c=[CH:1]1':    kommt 1x vor, in 1 Molekuel(en)  <- Nur in TDI (Ring)
+```
+
+**Warum wichtig?** Diese Zahlen werden spaeter als 2 Zusatz-Features verwendet:
+- `freq = 1 - exp(-count)` (z.B. 0.998 fuer count=6)
+- `coverage = n_inputs / total_inputs` (z.B. 2/2 = 1.0)
+
+Ein Subgraph der in ALLEN Molekuelen vorkommt, wird tendenziell eher selektiert
+(da er eine allgemeinere Produktionsregel liefert).
+
+---
+
+## 3. Phase 2: Eine MCMC-Iteration
+
+> **Paper:** Section 4.1, S.5, Figure 3
+> **Code:** `grammar_generation.py`, Zeilen 57-117 (`grammar_generation()`)
+
+Eine Iteration = ein Durchlauf ueber ALLE Molekuele, bei dem:
+1. Der Agent fuer jeden Subgraphen entscheidet: selektieren (1) oder ignorieren (0)
+2. Selektierte Subgraphen werden kontrahiert -> Produktionsregeln entstehen
+3. Der Hypergraph schrumpft
+
+### 3.1 Feature-Vektor zusammenbauen (302-dim)
+
+> **Paper:** Section 4.2, S.6, Eq. (2)
+> **Code:** `grammar_generation.py`, Zeilen 67-80
+
+**Fuer jeden Subgraph wird ein 302-dimensionaler Feature-Vektor gebaut:**
 
 ```python
-def MCMC_sampling(agent, all_input_graphs_dict, all_subgraph_set, all_grammar, sample_number, args):
-    iter_num = 0
-    while(True):
-        done_flag, ... = grammar_generation(agent, ...)
-        if done_flag:
-            break
-        iter_num += 1
-    return iter_num, new_grammar, new_input_graphs_dict
+# grammar_generation.py, Zeilen 67-80
+subg_feature = input_g.get_subg_feature_for_agent(subgraph)   # 300-dim GNN
+num_occurance = subgraph_set.map_to_input[MolKey(subgraph)][1] # z.B. 6
+num_in_input = len(subgraph_set.map_to_input[MolKey(subgraph)][0].keys())  # z.B. 2
+
+final_feature = []
+final_feature.extend(subg_feature.tolist())          # [0..299]: 300-dim GNN
+final_feature.append(1 - np.exp(-num_occurance))     # [300]: Haeufigkeit (0..1)
+final_feature.append(num_in_input / total_inputs)    # [301]: Abdeckung (0..1)
 ```
-- Ruft `grammar_generation()` wiederholt auf bis alle Hyperedges kontrahiert sind
-- **Paper-Bezug:** "The above process continues until the hypergraph only consists of one single non-terminal node." (Sec. 4.1, S.5)
 
-#### grammar_generation() -- Eine Iteration
-**Datei:** `grammar_generation.py:57-117`
+**Output-Beispiel:**
+```
+Subgraph '[CH3:1][CH3:1]': GNN-Feature(300-dim) + freq=0.998 + coverage=2/2
+Subgraph 'C[CH3:1]':       GNN-Feature(300-dim) + freq=0.632 + coverage=1/2
+```
 
-Fuer jedes Eingabe-Molekuel (Z.75):
-
-1. **Feature-Berechnung** (Z.80-89): Fuer jeden noch vorhandenen Subgraphen:
-   - GNN-Feature (300-dim) via `get_subg_feature_for_agent()` (molecule_graph.py:137-144)
-   - Plus 2 Zusatzfeatures:
-     - `1 - exp(-num_occurance)`: Wie oft kommt dieser Subgraph insgesamt vor?
-     - `num_in_input / total_inputs`: In wie vielen Molekuelen kommt er vor?
-   - -> 302-dimensionaler Feature-Vektor pro Subgraph
-   - **Paper Sec. 4.2 (S.6):** "F(e;theta) = F_theta(f(e))" wobei f(e) = GNN Features
-
-2. **Agent-Sampling** (Z.90-93): `sample(agent, features, iter_num, sample_number)`
-   - Agent entscheidet fuer JEDEN Subgraph: selektieren (1) oder nicht (0)?
-   - Bernoulli-Verteilung ueber die Ausgabe des MLP
-   - **Paper Eq. 2 (S.6):** "X ~ Bernoulli(phi(e;theta)), phi(e;theta) = P(X=1) = sigma(-F_theta(f(e)))"
-   - **ACHTUNG:** Im Code ist die Logik leicht anders -- der Agent gibt Softmax ueber [nicht-selektieren, selektieren] aus
-
-3. **Merge selektierter Subgraphen** (Z.100): `merge_selected_subgraphs(action_list)`
-   - **Datei:** `private/molecule_graph.py:193-260`
-   - Verbindet ueberlappende selektierte Subgraphen zu groesseren Subgraphen
-   - **Paper-Bezug:** Sec. 4.1 -- "extract all connected components with respect to these hyperedges"
-
-4. **Regel-Generierung** (Z.102-110):
-   - Fuer jeden zusammengefuehrten Subgraph: `generate_rule(input_g, subg, grammar)`
-   - **Datei:** `private/grammar.py:835-992`
-   - Dann `update_subgraph()` um den Hypergraphen zu aktualisieren
-
-#### generate_rule() im Detail
-**Datei:** `private/grammar.py:835-992`
-
-**Paper Eq. 1 (S.5)** wird hier implementiert:
-
-1. **Ext-Nodes finden** (Z.886-938):
-   - Iteriert ueber alle Edges des Subgraphen
-   - Fuer unbesuchte Edges: findet Knoten die ausserhalb des Subgraphen liegen -> ext_nodes (= V_anc)
-   - Fuer besuchte Edges: nutzt "watershed" Mechanismus um vorherige NT-Knoten zu tracken
-
-2. **RHS konstruieren** (Z.891-953):
-   - Kopiert den Subgraphen mit allen Attributen
-   - Fuegt ext_nodes hinzu
-   - Markiert besuchte Bereiche als NT-Edges
-
-3. **LHS konstruieren** (Z.960-983):
-   - Wenn keine ext_nodes -> Startregel (LHS ist leer)
-   - Sonst: LHS = eine NT-Hyperedge mit den ext_nodes
-   - **Paper:** "For this finally constructed rule, we use the initial node X instead of R* on the left-hand side." (S.5)
-
-4. **Zur Grammatik hinzufuegen** (Z.988-990):
-   - `grammar.append(rule)` prueft ob die Regel schon existiert (via `is_same()`)
-   - **Datei:** `private/grammar.py:527-626` -- `ProductionRuleCorpus`
-
-#### Produktionsregel-Typen
-**Datei:** `private/grammar.py:30-57`
-
-| Typ | Bedingung | Paper-Bezug |
-|-----|-----------|-------------|
-| **Start-Regel** | `lhs.num_nodes == 0` (Z.47) | Figure 2(b): p1 (X -> ...) |
-| **Expansion-Regel** | LHS hat NT, RHS hat weitere NTs | Figure 2(b): p3, p4 |
-| **End-Regel** | `rhs` hat keine NT-Edges (Z.57) | Figure 2(b): p2 |
+C-C Bindung (freq=0.998) kommt viel haeufiger vor als die Methylgruppe (freq=0.632).
 
 ---
 
-## Arbeitspaket 3: Agent (Potential Function) & Feature-Extraktion <a name="arbeitspaket-3"></a>
+### 3.2 Agent-Sampling (Bernoulli)
 
-### Paper-Kontext
+> **Paper:** Section 4.2, S.6, Eq. (2):
+> `X ~ Bernoulli(phi(e; theta))`,  `phi(e; theta) = sigma(-F_theta(f(e)))`
+> **Code:** `agent.py`, Zeilen 7-35
 
-**Paper Sec. 4.2, "Optimizing Grammar Construction" (S.6):**
-> "We define our edge weight function as F(e;theta) = F_theta(f(e))"
-> - f(e) = Feature Extractor (pretrained GNN), theta = Parameter von F_theta
-> - F_theta = "potential function" (neuronales Netz)
-> - Ausgabe: phi(e;theta) = sigma(-F_theta(f(e)))
-> - Groesseres F -> kleinere Wahrscheinlichkeit dass die Hyperedge selektiert wird
+**Architektur des Agent:**
+```
+302-dim Input -> Linear(302, 128) -> ReLU -> Dropout(0.5) -> Linear(128, 2) -> Softmax
+```
 
-**Paper Appendix B (S.13):**
-> "For the potential function F_theta, we use a two-layer fully connected network with size 300 and 128."
-> Feature Extractor: pretrained GIN (Graph Isomorphism Network) mit 300-dim Node Embeddings.
-
-### Code
-
-#### Agent-Architektur
-**Datei:** `agent.py:7-19`
-
+**Code:** `agent.py`, Zeilen 7-19
 ```python
 class Agent(nn.Module):
     def __init__(self, feat_dim, hidden_size):
         self.affine1 = nn.Linear(feat_dim + 2, hidden_size)  # 302 -> 128
         self.dropout = nn.Dropout(p=0.5)
         self.affine2 = nn.Linear(hidden_size, 2)             # 128 -> 2
+    def forward(self, x):
+        x = self.affine1(x)
+        x = self.dropout(F.relu(x))
+        action_scores = self.affine2(x)
+        return F.softmax(action_scores, dim=-1)
 ```
 
-- Input: 302 = 300 (GNN) + 2 (Haeufigkeits-Features)
-- Hidden: 128
-- Output: 2 (Softmax ueber [nicht-selektieren, selektieren])
-- **Paper vs. Code Unterschied:** Paper beschreibt Bernoulli mit sigma(-F_theta), Code nutzt Categorical ueber Softmax. Effekt ist aequivalent.
-
-#### Sample-Funktion
-**Datei:** `agent.py:22-35`
-
+**Sampling:** `agent.py`, Zeilen 22-35 (`sample()`)
 ```python
-def sample(agent, subgraph_feature, iter_num, sample_number):
-    prob = agent(subgraph_feature)         # N x 2 Wahrscheinlichkeiten
-    m = Categorical(prob)                   # Categorical-Verteilung
-    a = m.sample()                          # 0 oder 1 pro Subgraph
-    take_action = (np.sum(a.numpy()) != 0)  # Mindestens einer selektiert?
+def sample(agent, features, iter_num, sample_number):
+    probs = agent(features)              # MLP Forward -> [N, 2] Wahrscheinlichkeiten
+    m = Categorical(probs)               # Kategorische Verteilung
+    actions = m.sample()                  # Sample fuer jeden Subgraph: 0 oder 1
+    log_probs = m.log_prob(actions)       # Log-Prob fuer REINFORCE speichern
+    agent.saved_log_probs[sample_number][iter_num] = log_probs
+    return actions.numpy(), any(actions == 1)
 ```
 
-- Wenn KEIN Subgraph selektiert wurde: `take_action = False` -> wird in `grammar_generation.py:92-93` wiederholt
-- Log-Probs werden gespeichert in `agent.saved_log_probs[sample_number][iter_num]` fuer REINFORCE
-
-#### Feature Extractor (GNN)
-**Datei:** `GCN/feature_extract.py:14-37`
-
-```python
-class feature_extractor():
-    def extract(self, graph_mol):
-        model = GNN_feature(num_layer=5, emb_dim=300, ...)  # 5-layer GIN
-        model.from_pretrained(self.pretrained_model_path)     # Laedt vortrainiertes Modell
-        node_features = model(graph_data.x, graph_data.edge_index, graph_data.edge_attr)
-        return node_features  # N_atoms x 300
+**Output-Beispiel (Mol 0, HDI):**
+```
+Agent-Entscheidung (0=ignorieren, 1=selektieren):
+  Subgraph 0: action=1  >>> SELEKTIERT <<<  Indices=[0, 1]  SMILES=O=[CH2:1]
+  Subgraph 1: action=1  >>> SELEKTIERT <<<  Indices=[1, 2]  SMILES=[CH2:1]=[NH:1]
+  Subgraph 2: action=0      ignoriert       Indices=[2, 3]  SMILES=[CH3:1][NH2:1]
+  Subgraph 3: action=0      ignoriert       Indices=[3, 4]  SMILES=[CH3:1][CH3:1]
+  ...
 ```
 
-- Verwendet vortrainiertes GIN von `GCN/model_gin/supervised_contextpred.pth`
-- **Paper Appendix B:** "we choose a pretrained graph neural network (Hu et al., 2019) as our feature extractor f(.)."
-- **ACHTUNG:** Das Modell wird NICHT finegetuned! (Appendix B: "we do not finetune its parameters during training")
-- **Performance-Problem im Code:** Das Modell wird bei JEDEM Aufruf von `get_subg_feature_for_agent()` neu geladen (molecule_graph.py:133)
-
-#### Subgraph-Feature fuer Agent
-**Datei:** `private/molecule_graph.py:137-144`
-
-```python
-def get_subg_feature_for_agent(self, subgraph):
-    nodes_feat = [self.get_nodes_feature(node_id) for node_id in subgraph.subfrags]
-    subfrags_feature = np.mean(nodes_feat, axis=0)  # Mean-Pooling ueber Atom-Features
-    return subfrags_feature  # 300-dim
-```
-
-Plus die 2 Zusatz-Features (in `grammar_generation.py:86-88`):
-- `1 - exp(-num_occurance)`: Gesamthaeufigkeit des Subgraphs (ueber alle Molekuele, saturiert bei ~1)
-- `num_in_input / len(input_graphs)`: Anteil der Molekuele die diesen Subgraph enthalten
+Die Entscheidung ist **stochastisch** -- jedes Mal andere Selektionen!
+Das ist der Kern des MCMC-Samplings.
 
 ---
 
-## Arbeitspaket 4: REINFORCE Training Loop <a name="arbeitspaket-4"></a>
+### 3.3 Ueberlappende Subgraphen mergen
 
-### Paper-Kontext
+> **Paper:** Section 4.1, S.5: "Extract all connected components"
+> **Code:** `private/molecule_graph.py`, Zeilen 193-260 (`merge_selected_subgraphs()`)
 
-**Paper Sec. 4.2, Eq. 3+4 (S.6):**
-> Optimierungsziel: max_theta E_X [sum_i lambda_i * M_i(X)]
-> Gradient (REINFORCE):
-> nabla_theta E[...] approx (1/N) * sum_n sum_i lambda_i * nabla_theta log(p(X)) * M_i(X)
-> - X = Sequenz aller Selektionsentscheidungen
-> - M_i = Metriken (Diversity, Synthesizability)
-> - lambda_i = Gewichte (lambda_1=1 fuer Diversity, lambda_2=2 fuer Syn)
-> - N = Anzahl MC-Samples (MCMC_size = 5)
+**Was passiert:** Selektierte Subgraphen die Atome teilen werden zusammengefuegt.
 
-### Code-Ablauf
-
-#### Hauptschleife
-**Datei:** `main.py:97-174`
-
+**Beispiel aus dem Output:**
 ```
-Fuer jede Epoche (max_epoches=50):                          # Z.117
-    Fuer jedes MCMC-Sample (MCMC_size=5):                   # Z.123
-        1. Daten & Grammatik kopieren (deepcopy)             # Z.125-127
-        2. MCMC_sampling() -> Grammatik konstruieren         # Z.128
-        3. evaluate() -> Diversity + Syn messen              # Z.130
-        4. R = diversity + 2 * syn_rate                      # Z.133
+Selektiert: Subgraph 0 [0,1] + Subgraph 1 [1,2]  (teilen Atom 1!)
+  -> Merged Subgraph 0: SMILES=O=C=[NH:1]  Indices=[0, 1, 2]
 
-    Policy Loss berechnen:                                    # Z.148-157
-        returns normalisieren (- mean)                        # Z.149
-        Fuer jedes Sample, jede Iteration:
-            loss += -log_prob * gamma^(T-t) * R              # Z.157
+Selektiert: Subgraph 5 [5,6] + Subgraph 6 [6,7] + Subgraph 7 [8,7]  (Kette!)
+  -> Merged Subgraph 1: SMILES=C(C[CH3:1])[CH3:1]  Indices=[5, 6, 7, 8]
 
-    Backprop + Optimizer Step                                 # Z.160-162
-    agent.saved_log_probs.clear()                             # Z.163
+Selektiert: Subgraph 9 [9,10]  (allein, kein Overlap)
+  -> Merged Subgraph 2: SMILES=[CH2:1]=[NH:1]  Indices=[9, 10]
 ```
 
-#### Reward-Berechnung
-**Datei:** `main.py:133`
+**Visuell fuer HDI (O=C=N-C-C-C-C-C-C-N=C=O):**
+```
+Atome:  0  1  2  3  4  5  6  7  8  9  10  11
+        O= C= N- C- C- C- C- C- C- N= C=  O
+        |------|        |-----------|  |---|
+        Merged 0        Merged 1       Merged 2
+        (O=C=N)         (CCCC)         (N=C)
+```
+
+---
+
+### 3.4 Produktionsregel erzeugen
+
+> **Paper:** Section 4.1, S.5, Eq. (1)
+> **Code:** `private/grammar.py`, Zeilen 835-992 (`generate_rule()`)
+
+**Was passiert fuer jeden gemergten Subgraph:**
+
+1. **RHS (Right-Hand-Side) bauen** (Zeilen 891-953):
+   - Kopiere alle Atome/Bindungen des Subgraphen
+   - Finde **Anker-Knoten**: Atome die den Subgraph mit dem Rest verbinden
+   - Diese Anker werden als "externe Knoten" mit `ext_id` markiert
+
+2. **LHS (Left-Hand-Side) bauen** (Zeilen 959-983):
+   - Ein einzelner Non-Terminal (NT) Knoten `R*`
+   - Verbunden mit den Anker-Knoten
+
+3. **Regel = LHS -> RHS**
+
+**Paper Eq. (1):**
+```
+LHS := H(V_L, E_L), V_L = {R*} union V_anc
+RHS := H(V_R, E_R), V_R = V_sub union V_anc
+```
+
+**Beispiel:** Fuer Merged Subgraph 0 (O=C=N, Indices [0,1,2]):
+- Anker: Atom 3 (C), da Atom 2 (N) mit Atom 3 verbunden ist
+- LHS: NT mit degree=1 (ein Anker)
+- RHS: O, C, N (3 Atome) + 1 Anker-Verbindung
+
+**Output-Beispiel:**
+```
+-> NEUE Regel 0 [END] erzeugt!     <- O=C=N Fragment (degree=1, 3 Atome)
+-> NEUE Regel 1 [END] erzeugt!     <- C-C-C-C Fragment (degree=2, 4 Atome)
+-> NEUE Regel 2 [END] erzeugt!     <- N=C Fragment (degree=2, 2 Atome)
+```
+
+**Regel-Typen:**
+- **END:** RHS enthaelt NUR Terminal-Atome (keine NT-Knoten) -> Stoppt die Generierung
+- **EXPANSION:** RHS enthaelt Terminal-Atome UND NT-Knoten -> Kann weiter expandiert werden
+- **START:** LHS ist das initiale Symbol X -> Erster Schritt der Generierung
+
+In der ersten Iteration entstehen nur END-Regeln, da noch nichts vorher kontrahiert wurde.
+
+**Code:** `private/grammar.py`, Zeilen 684-727 (`append()`)
+```python
+def append(self, prod_rule):
+    for each_idx, each_prod_rule in enumerate(self.prod_rule_list):
+        is_same, isomap = prod_rule.is_same(each_prod_rule, ignore_order=True)
+        if is_same:
+            return each_idx, prod_rule  # Duplikat!
+    self.prod_rule_list.append(prod_rule)  # Neue Regel
+    return len(self.prod_rule_list)-1, prod_rule
+```
+
+**Output bei TDI (Mol 1):**
+```
+-> NEUE Regel 3 [END] erzeugt!     <- Methylgruppe (C-CH3)
+-> NEUE Regel 4 [END] erzeugt!     <- C-N Bindung (fuer Isocyanat-Seitenkette)
+-> NEUE Regel 5 [END] erzeugt!     <- O=C (Isocyanat-Ende)
+-> Regel existiert bereits (Duplikat)  <- O=C Fragment war schon da!
+-> NEUE Regel 6 [END] erzeugt!     <- C-C-N Fragment
+```
+
+---
+
+### 3.5 Hypergraph aktualisieren
+
+> **Paper:** Section 4.1, S.5: "Update H_{M,t+1} by replacing each component with R*"
+> **Code:** `private/molecule_graph.py`, Zeilen 262-296 (`update_subgraph()`)
+
+**Was passiert:** Die kontrahierten Teile werden als "besucht" markiert und in den
+verbleibenden Subgraphen absorbiert. Die verbleibenden Subgraphen wachsen dadurch.
+
+**Output-Beispiel (HDI nach 1 Iteration):**
+```
+VORHER: 11 Subgraphen (jeder = 1 Bindung)
+NACHHER: 5 Subgraphen (groessere Fragmente)
+  Subgraph 0: Indices=[0,1,2,3]     SMILES=O=C=N[CH3:1]      <- Gewachsen!
+  Subgraph 1: Indices=[3,4]         SMILES=[CH3:1][CH3:1]     <- Unveraendert
+  Subgraph 2: Indices=[4,5,6,7,8]   SMILES=C(C[CH3:1])C[CH3:1]
+  Subgraph 3: Indices=[5,6,7,8,9,10] SMILES=C(CN=[CH2:1])C[CH3:1]
+  Subgraph 4: Indices=[9,10,11]      SMILES=O=C=[NH:1]
+```
+
+---
+
+## 4. Phase 3: Kompletter MCMC-Durchlauf
+
+> **Paper:** Section 4.1, S.5
+> **Code:** `grammar_generation.py`, Zeilen 120-133 (`MCMC_sampling()`)
+
+**Was passiert:** Phase 2 wird WIEDERHOLT bis alle Subgraphen kontrahiert sind.
 
 ```python
-R = eval_metric['diversity'] + 2 * eval_metric['syn']
+# grammar_generation.py, Zeilen 120-133
+def MCMC_sampling(agent, input_graphs_dict, subgraph_set, grammar, sample_number, args):
+    iter_num = 0
+    while True:
+        done_flag, new_igd, new_ss, new_g = grammar_generation(
+            agent, input_graphs_dict, subgraph_set, grammar, iter_num, sample_number, args
+        )
+        if done_flag:
+            break
+        input_graphs_dict = deepcopy(new_igd)
+        subgraph_set = deepcopy(new_ss)
+        grammar = deepcopy(new_g)
+        iter_num += 1
+    return iter_num, grammar, input_graphs_dict
 ```
 
-- **Paper Sec. 5.4 (S.9):** "we use lambda_1 = 1, lambda_2 = 2 for a balanced trade-off between Diversity and RS."
-- Figure 4 zeigt den Trade-off fuer verschiedene lambda-Kombinationen
+**Output-Beispiel (6 Iterationen bis fertig):**
+```
+MCMC Iteration 0: 20 Subgraphen -> 9 Subgraphen    (5 neue Regeln, alle END)
+MCMC Iteration 1:  9 Subgraphen -> 7 Subgraphen    (7 Regeln, erste EXPANSION!)
+MCMC Iteration 2:  7 Subgraphen -> 5 Subgraphen    (9 Regeln)
+MCMC Iteration 3:  5 Subgraphen -> 2 Subgraphen    (11 Regeln)
+MCMC Iteration 4:  2 Subgraphen -> 0 Subgraphen    (13 Regeln, START-Regeln!)
+MCMC Iteration 5:  0 -> FERTIG!
+```
 
-#### Policy Loss im Detail
-**Datei:** `main.py:147-157`
+**Warum entstehen verschiedene Regeltypen zu verschiedenen Zeitpunkten?**
+
+| Iteration | Was passiert | Regeltyp |
+|-----------|-------------|----------|
+| Frueh (0-1) | Kleine Fragmente kontrahiert (O=C, C-C, N-C) | **END** (nur Atome, keine NT) |
+| Mitte (2-3) | Groessere Fragmente, enthalten bereits kontrahierte Teile | **EXPANSION** (Atome + NT-Knoten) |
+| Ende (4) | Gesamtes Molekuel wird zu einem Knoten | **START** (LHS = X) |
+
+**Fertige Grammatik (13 Regeln):**
+```
+Regel  0 [END]:       NT(degree=2) -> 3 Atome: [N, C, C]
+Regel  1 [END]:       NT(degree=2) -> 2 Atome: [C, C]
+Regel  2 [END]:       NT(degree=1) -> 2 Atome: [C, O]
+...
+Regel  5 [EXPANSION]: NT(degree=2) -> 0 Atome, 2 NT-Edges   <- Verbindet 2 Teilbaeume
+...
+Regel 11 [START]:     X -> 0 Atome, 2 NT-Edges              <- HDI: Zwei Enden
+Regel 12 [START]:     X -> 3 Atome [C,C,C], 3 NT-Edges      <- TDI: Ring + 3 Seitenketten
+```
+
+**Warum 2 START-Regeln?** Weil wir 2 verschiedene Molekuele haben:
+- HDI (linear): START -> 2 NT-Knoten (linke und rechte Haelfte)
+- TDI (Ring): START -> 3 Atome (Ring-Kern) + 3 NT (Methyl + 2 Isocyanat-Gruppen)
+
+---
+
+## 5. Phase 4: Warum 5 MCMC Samples?
+
+> **Paper:** Section 4.2, S.6 + Appendix B, S.13: "MC sampling size N = 5"
+> **Code:** `main.py`, Zeilen 123-145 (innere Schleife ueber `MCMC_size`)
+
+**Kernproblem:** Das Agent-Sampling ist STOCHASTISCH. Jeder Durchlauf erzeugt
+eine ANDERE Grammatik, weil andere Subgraphen selektiert werden.
+
+**Warum 5 und nicht 1?**
+1. **Exploration:** Verschiedene Grammatiken erkunden verschiedene "Zerlegungsstrategien"
+2. **Varianzreduktion:** Mittelung ueber 5 Returns reduziert die Varianz des Gradientschaetzers
+3. **Besseres Lernsignal:** Der Agent sieht: "Strategie A gab Reward 1.5, Strategie B nur 0.8"
+
+**Output-Beispiel (3 Samples statt 5 fuer Geschwindigkeit):**
+```
+Sample   #Regeln    #Generiert   Diversity
+0        12         5            0.7983
+1        10         5            0.7917
+2        11         5            0.7373
+```
+
+**Beobachtung:** Gleiche 2 Eingabe-Molekuele, aber:
+- Sample 0: 12 Regeln, Diversity 0.80
+- Sample 2: 11 Regeln, Diversity 0.74
+
+Die unterschiedlichen Selektions-Entscheidungen fuehren zu unterschiedlich
+ausdruecksstarken Grammatiken!
+
+---
+
+## 6. Phase 5: REINFORCE Training
+
+> **Paper:** Section 4.2, S.6, Eq. (3) + (4)
+> **Code:** `main.py`, Zeilen 148-162
+
+### 6.1 Reward-Berechnung
+
+> **Paper:** Section 5.1, S.7 + Appendix B, S.13
+
+```
+R = lambda_1 * diversity + lambda_2 * syn_rate
+  = 1 * diversity   + 2 * syn_rate
+```
+
+- **diversity:** Mittlere paarweise Tanimoto-Distanz der generierten Molekuele
+  (Code: `private/metrics.py`, InternalDiversity Klasse)
+- **syn_rate:** Anteil der Molekuele fuer die Retro* einen Syntheseweg findet
+  (Code: `main.py`, Zeilen 65-94, `retro_sender()`)
+
+**Output-Beispiel:**
+```
+Sample 0: Diversity=0.7312, Syn(dummy)=0.3675, R = 0.7312 + 2*0.3675 = 1.4661
+Sample 1: Diversity=0.7760, Syn(dummy)=0.1903, R = 0.7760 + 2*0.1903 = 1.1567
+Sample 2: Diversity=0.7047, Syn(dummy)=0.3780, R = 0.7047 + 2*0.3780 = 1.4607
+```
+
+### 6.2 Policy Loss
+
+> **Paper:** Eq. (4), S.6
+
+**Schritt 1: Returns normalisieren (Baseline-Subtraktion)**
+```
+Rohe Returns:         [1.4661, 1.1567, 1.4607]
+Mittelwert:           1.3612
+Normalisiert:         [0.1050, -0.2045, 0.0995]
+```
+
+Sample 1 hat den niedrigsten Reward -> negativer normalisierter Return.
+Der Agent wird bestraft fuer die Entscheidungen in Sample 1.
+
+**Schritt 2: Policy Loss berechnen**
+
+> Code: `main.py`, Zeilen 148-157
 
 ```python
-returns = torch.tensor(returns)
-returns = (returns - returns.mean())  # Baseline-Subtraktion (Varianzreduktion)
-
+# main.py, Zeilen 148-157
+policy_loss = torch.tensor([0.])
 for sample_number in agent.saved_log_probs.keys():
     max_iter_num = max(list(agent.saved_log_probs[sample_number].keys()))
-    for iter_num_key in agent.saved_log_probs[sample_number].keys():
-        log_probs = agent.saved_log_probs[sample_number][iter_num_key]
+    for iter_num in agent.saved_log_probs[sample_number].keys():
+        log_probs = agent.saved_log_probs[sample_number][iter_num]
         for log_prob in log_probs:
-            policy_loss += (-log_prob * gamma ** (max_iter_num - iter_num_key) * returns[sample_number]).sum()
+            policy_loss += (-log_prob * gamma ** (max_iter_num - iter_num)
+                           * returns[sample_number]).sum()
 ```
 
-- **Paper Eq. 4:** "We then apply gradient ascent" -> im Code: `-log_prob * R` (Gradient Descent auf negativen Reward)
-- **Discount:** `gamma^(T-t)` mit gamma=0.99 -- fruehere Entscheidungen werden weniger gewichtet
-- **Paper:** "Note that M_i(X) is normalized to zero mean for each sampling batch to reduce variance in training."
+**Formel:** `Loss = -sum( log_prob * gamma^(T-t) * R_normalized )`
 
-#### Hyperparameter (Paper Appendix B, S.13)
-**Datei:** `main.py:178-191`
+- `log_prob`: Log-Wahrscheinlichkeit der Agent-Entscheidung
+- `gamma^(T-t)`: Discount-Faktor (spaetere Entscheidungen zaehlen mehr, da T-t kleiner)
+- `R_normalized`: Normalisierter Return
 
-| Parameter | Wert | Code-Zeile | Paper |
-|-----------|------|------------|-------|
-| max_epoches | 50 | Z.182 | App. B: "20 epochs" (Diskrepanz!) |
-| MCMC_size | 5 | Z.184 | App. B: "MC sampling size as 5" |
-| learning_rate | 1e-2 | Z.185 | App. B: "learning rate 0.01" |
-| hidden_size | 128 | Z.181 | App. B: "size 300 and 128" |
-| gamma | 0.99 | Z.186 | Nicht explizit im Paper |
-| num_generated_samples | 100 | Z.183 | App. B: "10k samples" (Eval vs. Training) |
+**Output:**
+```
+Gesamte Entscheidungen: 18
+Policy Loss: -0.328252
+```
+
+### 6.3 Backpropagation
+
+**Code:** `main.py`, Zeilen 160-162
+```python
+optimizer.zero_grad()
+policy_loss.backward()
+optimizer.step()
+agent.saved_log_probs.clear()
+```
+
+**Output:**
+```
+Gewichte vorher (erste 3): [-0.0221, 0.0396, -0.0095]
+Gewichte nachher (erste 3): [-0.0121, 0.0496, 0.0005]
+Differenz:                  [+0.0100, +0.0100, +0.0100]
+```
+
+Die Gewichte aendern sich! Nach 50 Epochen mit je 5 Samples wird der Agent
+bessere Selektions-Entscheidungen treffen.
 
 ---
 
-## Arbeitspaket 5: Grammatik-Produktion (Molekuel-Generierung) <a name="arbeitspaket-5"></a>
+## 7. Phase 6: Molekuel-Generierung
 
-### Paper-Kontext
+> **Paper:** Appendix A, S.13 + Section 3, S.4, Figure 2c
+> **Code:** `grammar_generation.py`, Zeilen 136-189 (`random_produce()`)
 
-**Paper Sec. 3, "Formal Grammar" (S.4):**
-> Erzeugung: Starte mit Initial-Symbol X, wende iterativ Regeln an:
-> 1. Finde einen NT-Knoten im aktuellen Graphen
-> 2. Finde eine Regel deren LHS zum NT-Knoten passt (Subgraph-Matching)
-> 3. Ersetze den NT-Knoten durch die RHS der Regel
-> 4. Wiederhole bis keine NT-Knoten mehr vorhanden
-
-**Paper Appendix A (S.13), "Molecule Generation":**
-> Wahrscheinlichkeit einer Regel r in Iteration t: p(r) = Z^{-1} * exp(alpha * t * x_r)
-> - x_r = 1 wenn die Regel eine End-Regel ist (RHS hat nur Terminale)
-> - alpha = 0.5
-> - Effekt: Mit steigender Iteration werden End-Regeln bevorzugt (damit Generierung terminiert)
-
-### Code
-**Datei:** `grammar_generation.py:136-189`
+### Generierungs-Algorithmus:
 
 ```python
+# grammar_generation.py, Zeilen 136-189
 def random_produce(grammar):
+    # 1. Starte mit leerem Hypergraph
+    hg = Hypergraph()
+
+    # 2. Waehle eine START-Regel und wende sie an
+    start_rules = grammar.start_rule_list
+    start_rule = random.choice(start_rules)
+    hg = start_rule.graph_rule_applied_to(hg)
+
+    # 3. Iterativ: finde NT-Knoten, waehle passende Regel
+    for iter in range(max_iterations):
+        nt_edges = hg.get_all_NT_edges()
+        if len(nt_edges) == 0:
+            break  # Keine NT mehr -> fertig!
+
+        nt_edge = random.choice(nt_edges)
+        matching_rules = grammar.get_prod_rules_with_lhs(nt_edge)
+
+        # Regel-Auswahl mit Terminierungs-Bias:
+        probs = [exp(0.5 * iter * is_ending(rule)) for rule in matching_rules]
+        probs = probs / sum(probs)
+        rule = random.choice(matching_rules, p=probs)
+
+        hg = rule.graph_rule_applied_to(hg)
+
+    # 4. Konvertiere Hypergraph -> Molekuel
+    mol = hg_to_mol(hg)
+    return mol
 ```
 
-1. **Start** (Z.157-165):
-   - Erstelle leeren Hypergraphen
-   - Waehle zufaellig eine Start-Regel und wende sie an
+**Terminierungs-Bias (Paper Appendix A):**
+```
+p(r) = Z^{-1} * exp(alpha * t * x_r)
+```
+- `alpha = 0.5`
+- `t` = aktuelle Iteration
+- `x_r = 1` wenn Regel nur Terminal-Atome hat (END-Regel), sonst 0
 
-2. **Iterative Expansion** (Z.166-182):
-   - Fuer JEDE Regel in der Grammatik: teste ob sie anwendbar ist (`graph_rule_applied_to`)
-   - Berechne Wahrscheinlichkeiten mit `prob_schedule()` (Z.143-155)
-   - Sample eine Regel gewichtet nach Wahrscheinlichkeit
-   - Abbruch wenn: nur noch Start-Regeln passen ODER iter > 30
+Bei Iteration 0: END und EXPANSION gleich wahrscheinlich.
+Bei Iteration 10: END-Regeln sind `exp(0.5 * 10) = 148x` wahrscheinlicher!
 
-3. **prob_schedule()** (Z.143-155):
-   ```python
-   prob = exp(0.5 * iter * x_r)  # x_r = is_ending (0 oder 1)
-   ```
-   - **Paper Appendix A:** "p(r) = Z^{-1} exp(alpha*t*x_r), alpha=0.5"
-   - Start-Regeln bekommen Wahrscheinlichkeit 0 (Z.150)
+**Output-Beispiel:**
+```
+Molekuel 1:  O=C=O                             (in 2 Iterationen)  <- Sehr kurz
+Molekuel 5:  Cc1ccc(CN=C=O)cc1N=C=O            (in 7 Iterationen)  <- = TDI (Trainingsmolekuel!)
+Molekuel 7:  O=C=NCCCCCCCCCCN=C=O              (in 7 Iterationen)  <- HDI-aehnlich, aber laenger
+Molekuel 9:  O=C=NCCCCCCCCCCCCCN=C=O           (in 10 Iterationen) <- Noch laenger
+Molekuel 10: O=C=C=NC1=NCCCCCC=CC(CN=O)=C1     (in 7 Iterationen)  <- Komplett NEU!
+```
 
-4. **Hypergraph -> Molekuel** (Z.183-188):
-   - `hg_to_mol(hypergraph)` konvertiert zurueck
-   - **Datei:** `private/hypergraph.py` -- Funktion `hg_to_mol()`
-
-#### graph_rule_applied_to() -- Regel anwenden
-**Datei:** `private/grammar.py:150-300+`
-
-- **Start-Regel** (Z.168-188): Fuegt alle Knoten und Edges der RHS zum Hypergraphen hinzu
-- **Expansion-Regel** (Z.190+):
-  1. Finde NT-Edges im Hypergraphen die zur LHS passen
-  2. Entferne die NT-Edge
-  3. Fuege die RHS ein, verbinde Anchor-Knoten korrekt
-  - **Paper Sec. 4 (S.4):** "we use subgraph matching (Gentner, 1983) to test whether the current graph contains a subgraph that is isomorphic to the rule's left-hand side."
+**Beobachtungen:**
+1. Manche Molekuele sind Trainingsmolekulen aehnlich (Interpolation)
+2. Manche sind komplett neu (Extrapolation)
+3. Alle behalten die Isocyanat-Grundstruktur (N=C=O Gruppen)
+4. Diversity = 0.81 (gut!)
 
 ---
 
-## Arbeitspaket 6: Evaluation & Metriken <a name="arbeitspaket-6"></a>
+## 8. Glossar
 
-### Paper-Kontext
-
-**Paper Sec. 5.1 (S.7):**
-> Metriken:
-> - **Validity:** % chemisch valider Molekuele
-> - **Uniqueness:** % einzigartiger Molekuele
-> - **Diversity:** Mittlere paarweise Tanimoto-Distanz (Morgan Fingerprints)
-> - **Chamfer Distance:** Distanz zwischen generierten und Trainings-Molekuelen
-> - **Retro* Score (RS):** Erfolgsrate der retrosynthetischen Planung
-> - **Membership:** % Molekuele die zur Monomer-Klasse gehoeren
-
-### Code
-
-#### evaluate()
-**Datei:** `main.py:21-62`
-
-1. **Sampling** (Z.31-47): Generiert `num_generated_samples` (100) einzigartige Molekuele via `random_produce()`
-   - Stoppt wenn 100 Samples erreicht oder 10 Fehlversuche hintereinander
-   - Prueft auf Duplikate via kanonische SMILES
-
-2. **Diversity** (Z.51-53): `div.get_diversity(generated_samples)`
-   - **Datei:** `private/metrics.py:8-26`
-   - Morgan Fingerprints (Radius=3, 2048 Bits) (Z.19)
-   - Paarweise Tanimoto-Similarity, dann `1 - mean_similarity`
-
-3. **Synthesizability** (Z.58-59): `retro_sender(generated_samples, args)`
-   - Kommuniziert via File-IPC mit dem Retro*-Prozess
+| Begriff | Paper | Code | Erklaerung |
+|---------|-------|------|------------|
+| **Hypergraph** | Sec. 3, S.3 | `private/hypergraph.py` | Graph wo Edges mehr als 2 Knoten verbinden koennen (fuer Ringe) |
+| **Hyperedge** | Sec. 3, S.3 | Edge in `Hypergraph` | Repr. ein Atom oder einen Ring |
+| **Terminal (T)** | Sec. 3, S.4 | `TSymbol` in `symbol.py` | Echtes Atom (O, C, N, ...) |
+| **Non-Terminal (NT)** | Sec. 3, S.4 | `NTSymbol` in `symbol.py` | Platzhalter `R*`, wird weiter expandiert |
+| **Produktionsregel** | Sec. 3, S.4 | `ProductionRule` in `grammar.py:30` | LHS -> RHS (z.B. R* -> O-C-N) |
+| **START-Regel** | Sec. 4.1, S.5 | `is_start_rule` in `grammar.py:46` | LHS = X (Anfangssymbol) |
+| **END-Regel** | Sec. 4.1, S.5 | `is_ending` in `grammar.py:56` | RHS hat keine NT -> Stoppt |
+| **EXPANSION-Regel** | Sec. 4.1, S.5 | (nicht END, nicht START) | RHS hat T + NT -> Geht weiter |
+| **Anker-Knoten** | Eq. (1), S.5 | `ext_id` in Hypergraph | Verbindung zwischen Fragment und Rest |
+| **F_theta** | Sec. 4.2, S.6 | `Agent` in `agent.py:7` | MLP (302->128->2), gewichtet Hyperedges |
+| **GIN** | App. B, S.13 | `GCN/feature_extract.py` | Pretrained GNN, erzeugt 300-dim Embeddings |
+| **MCMC Sample** | Sec. 4.2, S.6 | `MCMC_sampling()` | Ein kompletter Grammatik-Konstruktions-Durchlauf |
+| **Diversity** | Sec. 5.1, S.7 | `InternalDiversity` in `metrics.py` | Mittlere paarweise Tanimoto-Distanz |
+| **syn_rate** | Sec. 5.1, S.7 | `retro_sender()` in `main.py:65` | Retro*-Synthesizability |
+| **REINFORCE** | Eq. (4), S.6 | `main.py:148-157` | Policy Gradient zum Optimieren des Agents |
+| **gamma** | Impl. Detail | `main.py:149` | Discount-Faktor fuer zeitliche Gewichtung |
+| **SubGraphSet** | Impl. Detail | `subgraph_set.py:3` | Trackt unique Subgraphen ueber alle Molekuele |
 
 ---
 
-## Arbeitspaket 7: Retro-Star Synthesizability <a name="arbeitspaket-7"></a>
+## Datei-Uebersicht
 
-### Paper-Kontext
-
-**Paper Sec. 5.1 (S.7):**
-> "Retro* Score (RS): Success rate of the Retro* model (Chen et al., 2020)
-> which was trained to find a retrosynthesis path to build a molecule
-> from a list of commercially available ones."
-
-### Code -- Zwei-Prozess-Architektur
-
-Das System nutzt File-basierte IPC weil Retro* eine separate Conda-Umgebung braucht.
-
-#### Sender (Hauptprozess)
-**Datei:** `main.py:65-94`
-
-```python
-def retro_sender(generated_samples, args):
-    # Schreibt SMILES in sender_file (generated_samples.txt)
-    # Wartet auf Ergebnisse in receiver_file (output_syn.txt)
-    # Gibt mean(syn_status) zurueck
-```
-
-- File-Locking via `fcntl.flock()` (Z.71-77)
-- Polling mit `time.sleep(1)` (Z.92)
-
-#### Listener (Separater Prozess)
-**Datei:** `retro_star_listener.py:40-87`
-
-```python
-def main(proc_id, filename, output_filename):
-    syn = Synthesisability()
-    while(True):
-        # Liest unbearbeitete Molekuele aus sender_file
-        # Markiert sie als "working"
-        # Fuehrt Retro*-Planung durch
-        # Schreibt Ergebnis (True/False) in output_file
-```
-
-- Gestartet in separatem Terminal: `conda activate retro_star_env && bash retro_star_listener.sh 1`
-- Nutzt `RSPlanner` mit 50 Iterationen, top-k=50 (Z.21-26)
-
----
-
-## Zusammenfassung: Gesamtablauf von Anfang bis Ende
-
-```
-1. SMILES einlesen                    main.py:197-202
-2. data_processing()                  grammar_generation.py:13-54
-   |-> mol_to_hg()                    private/hypergraph.py
-   |-> SubGraphSet erstellen          private/subgraph_set.py
-3. learn() Hauptschleife              main.py:97-174
-   |
-   |-> Epoche (50x)                   main.py:117
-   |   |-> MCMC Sample (5x)          main.py:123
-   |   |   |-> MCMC_sampling()        grammar_generation.py:120-133
-   |   |   |   |-> grammar_generation()  grammar_generation.py:57-117
-   |   |   |   |   |-> Agent sampling    agent.py:22-35
-   |   |   |   |   |-> merge_selected    molecule_graph.py:193-260
-   |   |   |   |   |-> generate_rule()   grammar.py:835-992
-   |   |   |   |   |-> update_subgraph() molecule_graph.py:262-296
-   |   |   |
-   |   |   |-> evaluate()             main.py:21-62
-   |   |   |   |-> random_produce()   grammar_generation.py:136-189
-   |   |   |   |-> InternalDiversity  private/metrics.py
-   |   |   |   |-> retro_sender()     main.py:65-94
-   |   |   |
-   |   |   |-> R = div + 2*syn        main.py:133
-   |   |
-   |   |-> Policy Loss berechnen      main.py:147-157
-   |   |-> optimizer.step()           main.py:160-162
-```
-
----
-
-## Glossar
-
-| Begriff | Paper | Code |
-|---------|-------|------|
-| Hyperedge | E_H, verbindet >2 Knoten | `edge` in Hypergraph |
-| Anchor Node | V_anc, verbindet Sub- mit Reststruktur | `ext_node` |
-| Non-Terminal (NT) | R*, Platzhalter fuer noch zu expandierende Teile | `NTSymbol` |
-| Terminal | Atome, Bonds | `TSymbol`, `BondSymbol` |
-| Production Rule | p_i : LHS -> RHS | `ProductionRule(lhs, rhs)` |
-| Potential Function | F_theta | `Agent` (MLP) |
-| Feature Extractor | f(e) | `feature_extractor` (GIN) |
-| MSF | Minimum Spanning Forest | Bottom-up Kontraktionsprozess |
-| MCMC | Monte Carlo Sampling | `MCMC_sampling()`, `MCMC_size=5` |
+| Datei | Zeilen | Rolle | Paper-Abschnitt |
+|-------|--------|-------|-----------------|
+| `main.py` | 97-174 | Trainingsschleife (50 Epochen, 5 Samples) | Sec. 4.2, Eq. 3+4 |
+| `grammar_generation.py` | 13-189 | data_processing, grammar_generation, MCMC_sampling, random_produce | Sec. 3, 4.1, App. A |
+| `agent.py` | 7-35 | Agent MLP + Bernoulli-Sampling | Sec. 4.2, Eq. 2 |
+| `private/grammar.py` | 30-992 | ProductionRule, ProductionRuleCorpus, generate_rule | Sec. 3, Eq. 1 |
+| `private/hypergraph.py` | 15-828 | Hypergraph, mol_to_hg, hg_to_mol | Sec. 3, Fig. 2a |
+| `private/molecule_graph.py` | 9-296 | MolGraph, InputGraph, SubGraph, merge | Sec. 4.1, Fig. 3 |
+| `private/subgraph_set.py` | 3-51 | SubGraphSet (cross-molecule tracking) | Sec. 4.2 (Features) |
+| `private/symbol.py` | 1-176 | TSymbol, NTSymbol, BondSymbol | Sec. 3 |
+| `private/metrics.py` | - | InternalDiversity, Retro* Wrapper | Sec. 5.1 |
+| `GCN/feature_extract.py` | - | Pretrained GIN Feature-Extraktor | App. B, App. D |
