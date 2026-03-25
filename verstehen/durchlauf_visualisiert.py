@@ -15,12 +15,6 @@ Ablauf:
   Phase 5: REINFORCE Training (eine Epoche)
   Phase 6: Molekuel-Generierung aus der gelernten Grammatik
 
-KEIN Retro* noetig -- wir ersetzen syn_rate durch einen Dummy.
-
-Ausfuehren:
-  cd <repo-root>
-  conda activate DEG
-  python verstehen/durchlauf_visualisiert.py
 =============================================================================
 """
 
@@ -449,8 +443,6 @@ def phase4_mcmc_samples(input_graphs_dict, subgraph_set, GNN_model_path):
     3. Der Reward wird gemittelt/normalisiert (Varianzreduktion)
     4. Der Agent lernt: welche Entscheidungen fuehren zu guten Grammatiken?
 
-    Denk daran wie ein A/B-Test: "Probiere 5 verschiedene Strategien,
-    schau welche am besten funktioniert, und lerne daraus."
     """)
 
     agent = Agent(feat_dim=300, hidden_size=128)
